@@ -95,8 +95,14 @@ def default_tools_for(user_msg: str) -> list:
         "which namespace", "namespace.*most", "namespace.*least",
     ])
     if is_pod_count_query:
+        # "not running" = strict phase query — do NOT include unhealthy-but-running pods
+        is_phase_only = any(k in lm for k in [
+            "not running", "not run", "currently not running",
+            "which pod.*not run", "pod.*not run", "pod not running",
+            "pods not running", "which are not running",
+        ])
         is_health_check = any(k in lm for k in [
-            "not running", "not run", "not ready", "any pod",
+            "not ready", "any pod",
             "failing", "unhealthy", "crashloop", "oomkill", "crashing",
         ])
         # Comparison queries always need show_all=True — full counts needed to compare
@@ -105,7 +111,9 @@ def default_tools_for(user_msg: str) -> list:
             "fewest pod", "fewest pods", "which namespace", "most running",
             "namespace.*most", "namespace.*least",
         ])
-        if is_health_check:
+        if is_phase_only:
+            return [("get_pod_status", {"namespace": ns, "show_all": False, "phase_only": True})]
+        elif is_health_check:
             show = False
         elif is_comparison:
             show = True

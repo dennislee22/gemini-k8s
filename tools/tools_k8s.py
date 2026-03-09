@@ -78,41 +78,64 @@ def reload_kubeconfig(yaml_content: str) -> dict:
 
 
 
+
 def _is_high_restart(pod, restart_count: int) -> bool:
     """
-    Return True only if the restart count is genuinely concerning.
-    Strategy: allow ~1 restart per day of pod age, with a minimum floor.
-    A pod with 18 restarts over 36 days (0.5/day) is healthy.
-    A pod with 18 restarts in the last hour is critical.
-    Floor: always flag if _is_high_restart(pod, restarts)0 regardless of age.
+    Return True only if the pod's restarts indicate a CURRENT problem.
+
+    Two-stage check:
+    1. Recency: if the last restart was > 1 day ago the pod has stabilised —
+       do NOT flag it regardless of total count. Old history is not a current issue.
+    2. Rate (for recent restarts): flag only if rate > 3 restarts/day in the
+       current run window.
+
+    Hard floor: always flag if restart_count > 100 (catastrophic history).
     """
+    import datetime as _dt
+
     if restart_count == 0:
         return False
-    if restart_count > 50:
+    if restart_count > 100:
         return True
-    # Use pod start time to compute age in days
-    import datetime as _dt
-    start = None
-    # Try pod-level start time first
-    if pod.status and pod.status.start_time:
-        start = pod.status.start_time
-    # Fall back to container start time
-    if start is None:
-        for cs in (pod.status.container_statuses or []):
-            if cs.state and cs.state.running and cs.state.running.started_at:
-                start = cs.state.running.started_at
-                break
-    if start is None:
-        # No age info — flag if > 10 restarts
-        return restart_count > 10
+
     now = _dt.datetime.now(_dt.timezone.utc)
-    age_days = max((now - start).total_seconds() / 86400, 0.1)
-    # Flag if more than 3 restarts per day on average
-    return (restart_count / age_days) > 3.0
+
+    # ── Step 1: find the time of the LAST restart ──────────────────────────────
+    # last_state.terminated.finished_at is the most reliable indicator.
+    last_restart_time = None
+    for cs in (pod.status.container_statuses or []):
+        if cs.last_state and cs.last_state.terminated:
+            t = cs.last_state.terminated.finished_at
+            if t:
+                if last_restart_time is None or t > last_restart_time:
+                    last_restart_time = t
+
+    # ── Step 2: if the last restart was > 24 h ago, pod has stabilised ────────
+    if last_restart_time is not None:
+        hours_since_last = (now - last_restart_time).total_seconds() / 3600
+        if hours_since_last > 24:
+            return False   # stable — last restart was old history, not current
+
+    # ── Step 3: rate check within the current run window ──────────────────────
+    # Use container running start time (= time of last restart recovery)
+    run_start = None
+    for cs in (pod.status.container_statuses or []):
+        if cs.state and cs.state.running and cs.state.running.started_at:
+            t = cs.state.running.started_at
+            if run_start is None or t > run_start:
+                run_start = t
+
+    if run_start is None and pod.status and pod.status.start_time:
+        run_start = pod.status.start_time
+
+    if run_start is None:
+        return restart_count > 10
+
+    run_days = max((now - run_start).total_seconds() / 86400, 0.1)
+    return (restart_count / run_days) > 3.0
 
 
-
-def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: bool = False) -> str:
+def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: bool = False, phase_only: bool = False) -> str:
     """
     List pods in a namespace.
 
@@ -138,9 +161,10 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                             f"Cannot report pod count for a non-existent namespace.")
                 raise
 
-        # ── Health-check mode: fetch only non-Running pods via field selector ─
-        # This is the same as: kubectl get pods -A --field-selector=status.phase!=Running
-        # Much faster on large clusters — avoids transferring 300+ healthy pods.
+        # ── Health-check / phase-only mode ──────────────────────────────────
+        # phase_only=True  → strict: ONLY pods whose phase != Running
+        # phase_only=False → also includes Running pods that are not fully Ready
+        #                    or have high recent restarts (unhealthy-but-running)
         if not show_all and not raw_output:
             non_running_phases = []
             for phase in ("Pending", "Failed", "Unknown"):
@@ -155,35 +179,38 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                 except ApiException:
                     pass
 
-            # Also catch Running pods that are not fully Ready (restarts, conditions)
-            _cont = None
-            while True:
-                try:
-                    kw = {"field_selector": "status.phase=Running", "limit": 100}
-                    if namespace != "all":
-                        kw["namespace"] = namespace
-                    if _cont:
-                        kw["_continue"] = _cont
-                    page = (_core.list_pod_for_all_namespaces(**kw)
-                            if namespace == "all"
-                            else _core.list_namespaced_pod(**kw))
-                    for pod in page.items:
-                        restarts = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
-                        ready    = sum(1 for cs in (pod.status.container_statuses or []) if cs.ready)
-                        tot      = len(pod.spec.containers)
-                        if ready < tot or _is_high_restart(pod, restarts):
-                            non_running_phases.append(pod)
-                    _cont = (page.metadata._continue
-                             if page.metadata and page.metadata._continue else None)
-                    if not _cont:
+            if not phase_only:
+                # Also catch Running pods that are not fully Ready or crashlooping
+                _cont = None
+                while True:
+                    try:
+                        kw = {"field_selector": "status.phase=Running", "limit": 100}
+                        if namespace != "all":
+                            kw["namespace"] = namespace
+                        if _cont:
+                            kw["_continue"] = _cont
+                        page = (_core.list_pod_for_all_namespaces(**kw)
+                                if namespace == "all"
+                                else _core.list_namespaced_pod(**kw))
+                        for pod in page.items:
+                            restarts = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
+                            ready    = sum(1 for cs in (pod.status.container_statuses or []) if cs.ready)
+                            tot      = len(pod.spec.containers)
+                            if ready < tot or _is_high_restart(pod, restarts):
+                                non_running_phases.append(pod)
+                        _cont = (page.metadata._continue
+                                 if page.metadata and page.metadata._continue else None)
+                        if not _cont:
+                            break
+                    except ApiException:
                         break
-                except ApiException:
-                    break
 
             if not non_running_phases:
-                return f"All pods are healthy and Running in namespace '{namespace}'."
+                msg = "All pods are in Running phase" if phase_only else "All pods are healthy and Running"
+                return f"{msg} in namespace '{namespace}'."
 
-            lines = [f"Unhealthy/non-Running pods in '{namespace}':"]
+            label = "Non-Running pods" if phase_only else "Unhealthy/non-Running pods"
+            out_lines = [f"{label} in '{namespace}':"]
             for pod in non_running_phases:
                 phase    = pod.status.phase or "Unknown"
                 restarts = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
@@ -191,11 +218,12 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                 tot      = len(pod.spec.containers)
                 bad      = [f"{c.type}={c.status}"
                             for c in (pod.status.conditions or []) if c.status != "True"]
-                lines.append(
+                out_lines.append(
                     f"  {pod.metadata.namespace}/{pod.metadata.name}: {phase} "
                     f"| Ready {ready}/{tot} | Restarts:{restarts}"
                     + (f" [{', '.join(bad)}]" if bad else ""))
-            return "\n".join(lines)
+            return "\n".join(out_lines)
+
 
         # ── show_all=True all-namespace: paginated field-selector approach ────
         # Fetch Running pods in pages of 100 to avoid one giant API call.
@@ -2038,14 +2066,12 @@ def _parse_mem_to_mib(mem_str: str) -> float:
         return 0.0
 
 
+
 def get_namespace_resource_summary(namespace: str) -> str:
     """
     Aggregate CPU and memory requests/limits for ALL pods in a namespace.
-    Returns a summary with total requested CPU (millicores + cores) and memory (MiB),
-    plus per-pod breakdown. Use this for questions like:
-    - "what is the total CPU request for all pods in namespace X?"
-    - "how much memory is requested in namespace X?"
-    - "count total cpu/memory requests in namespace X"
+    Includes both regular containers and init containers.
+    Returns total CPU/memory requested and limited, plus per-pod breakdown.
     """
     try:
         pods = _core.list_namespaced_pod(namespace=namespace, limit=1000)
@@ -2055,18 +2081,21 @@ def get_namespace_resource_summary(namespace: str) -> str:
     if not pods.items:
         return f"No pods found in namespace '{namespace}'."
 
-    total_cpu_req_m  = 0
-    total_cpu_lim_m  = 0
+    total_cpu_req_m   = 0
+    total_cpu_lim_m   = 0
     total_mem_req_mib = 0.0
     total_mem_lim_mib = 0.0
     pod_lines = []
 
     for pod in pods.items:
-        pod_cpu_req_m  = 0
-        pod_cpu_lim_m  = 0
+        pod_cpu_req_m   = 0
+        pod_cpu_lim_m   = 0
         pod_mem_req_mib = 0.0
         pod_mem_lim_mib = 0.0
-        for c in (pod.spec.containers or []):
+
+        # Include both regular containers and init containers
+        all_containers = list(pod.spec.containers or []) + list(pod.spec.init_containers or [])
+        for c in all_containers:
             req = (c.resources.requests or {}) if c.resources else {}
             lim = (c.resources.limits   or {}) if c.resources else {}
             pod_cpu_req_m   += _parse_cpu_to_millicores(req.get("cpu",    "0"))
@@ -2079,11 +2108,39 @@ def get_namespace_resource_summary(namespace: str) -> str:
         total_mem_req_mib += pod_mem_req_mib
         total_mem_lim_mib += pod_mem_lim_mib
 
-        cpu_req_s = f"{pod_cpu_req_m}m" if pod_cpu_req_m else "none"
-        mem_req_s = f"{pod_mem_req_mib:.0f}Mi" if pod_mem_req_mib else "none"
+        cpu_req_s = f"{pod_cpu_req_m}m" if pod_cpu_req_m else "0m (not set)"
+        mem_req_s = f"{pod_mem_req_mib:.0f}Mi" if pod_mem_req_mib else "0Mi (not set)"
+        cpu_lim_s = f"{pod_cpu_lim_m}m" if pod_cpu_lim_m else "0m (not set)"
+        mem_lim_s = f"{pod_mem_lim_mib:.0f}Mi" if pod_mem_lim_mib else "0Mi (not set)"
         pod_lines.append(
-            f"  {pod.metadata.name}: cpu_req={cpu_req_s}  mem_req={mem_req_s}"
+            f"  {pod.metadata.name}: "
+            f"cpu_req={cpu_req_s}  mem_req={mem_req_s}  "
+            f"cpu_lim={cpu_lim_s}  mem_lim={mem_lim_s}"
         )
+
+    def _fmt_cpu(m: int) -> str:
+        if m == 0:
+            return "0m — no CPU requests set on any pod"
+        return f"{m}m ({m/1000:.3f} cores)"
+
+    def _fmt_mem(mib: float) -> str:
+        if mib == 0:
+            return "0Mi — no memory requests set on any pod"
+        return f"{mib:.0f}Mi ({mib/1024:.2f}Gi)"
+
+    lines_out = [
+        f"Resource summary for namespace '{namespace}' ({len(pods.items)} pods):",
+        f"",
+        f"  TOTAL CPU  requested : {_fmt_cpu(total_cpu_req_m)}",
+        f"  TOTAL CPU  limit     : {_fmt_cpu(total_cpu_lim_m)}",
+        f"  TOTAL MEM  requested : {_fmt_mem(total_mem_req_mib)}",
+        f"  TOTAL MEM  limit     : {_fmt_mem(total_mem_lim_mib)}",
+        f"",
+        f"Per-pod breakdown (cpu_req / mem_req / cpu_lim / mem_lim):",
+    ] + pod_lines
+
+    return "\n".join(lines_out)
+
 
     def _fmt_cpu(m: int) -> str:
         if m == 0:
@@ -2644,6 +2701,14 @@ K8S_TOOLS: dict = {
                             "description": "Set true to include healthy/running pods in the output"},
             "raw_output":  {"type": "boolean", "default": False,
                             "description": "Set true to return kubectl-style tabular output (use when user asks to 'show', 'display', or wants 'the output' of pods)"},
+            "phase_only":  {"type": "boolean", "default": False,
+                            "description": (
+                                "Set true when the user asks ONLY about pod phase/status "
+                                "(e.g. 'which pods are not Running', 'any pod not Running'). "
+                                "Returns ONLY pods whose phase is Pending/Failed/Unknown. "
+                                "Does NOT include Running pods with high restarts or not-ready containers. "
+                                "Use phase_only=false (default) for health/unhealthy queries."
+                            )},
         },
     },
     "get_pod_logs": {

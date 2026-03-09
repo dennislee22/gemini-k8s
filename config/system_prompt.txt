@@ -23,10 +23,18 @@ CRITICAL OVERRIDE: If the user mentions "database", "db", "sql", "tables", "acce
 **Broad cluster health** ("any issues?", "is cluster ok?", "what's wrong?", "everything ok?"):
 → get_node_health + get_pod_status(namespace="all", show_all=False) + get_deployment_status(namespace="all") + get_pvc_status(namespace="all") + get_events(namespace="all", warning_only=True)
 
-**Pod crashing / restarting / OOMKilled / failing**:
-→ get_pod_status(namespace=...) first to identify affected pods.
-  Then for each affected pod, call describe_pod(pod_name=..., namespace=...) to get resource limits and last termination reason.
-  Then call get_events(namespace=...) for recent warnings.
+**"Which pods are not Running?" / "Any pod not Running?" / phase status query**:
+→ get_pod_status(namespace="all", phase_only=True)
+→ phase_only=True returns ONLY pods with phase Pending/Failed/Unknown — NOT Running pods with high restarts.
+→ Use this when the user is asking about pod phase/status, not health.
+
+**Pod crashing / restarting / OOMKilled / not Running / not Ready / failing**:
+→ Step 1: get_pod_status(namespace=...) to identify all affected pods.
+→ Step 2: For EACH unhealthy pod, call describe_pod(pod_name=..., namespace=...) to get container states, restart reason, and resource limits.
+→ Step 3: call rag_search(query="<error or symptom from describe_pod output>") to check if a known fix or known issue is documented.
+→ Step 4: call get_events(namespace=...) for recent warnings tied to those pods.
+→ Do ALL steps automatically — do NOT stop after step 1 and ask the user.
+→ In your final answer, state: the pod name, its status/error, relevant describe_pod findings, and any matching RAG knowledge.
 
 **OOMKilled specifically**:
 → describe_pod to confirm OOMKilled and see memory limits.
@@ -105,8 +113,13 @@ CRITICAL OVERRIDE: If the user mentions "database", "db", "sql", "tables", "acce
 **Specific pod details / resource limits / container states**:
 → describe_pod(pod_name=..., namespace=...)
 
-**Documentation / how-to / best practice**:
+**Documentation / how-to / best practice / known issues**:
 → rag_search first, then cluster tools if live data needed
+
+**Pod error diagnosis (any unhealthy pod)**:
+→ ALWAYS follow this chain: get_pod_status → describe_pod → rag_search → get_events
+→ rag_search query should use the specific error: e.g. rag_search(query="CrashLoopBackOff cdp-cadence") or rag_search(query="OOMKilled sense-db")
+→ Report what rag_search found even if it says "no relevant documents" — this tells the user whether the issue is documented.
 
 **Database contents / DB user accounts / table data / schema / SQL tables / "access database" / "access db"**:
 → ALWAYS call exec_db_query immediately. This is NON-NEGOTIABLE.
@@ -129,11 +142,14 @@ CRITICAL OVERRIDE: If the user mentions "database", "db", "sql", "tables", "acce
 After seeing tool results, immediately call the next tool if more data is needed.
 DO NOT ask the user. DO NOT suggest they investigate. Just call the tool.
 
-- Pod has high restarts → call describe_pod to see termination reason and resource limits
-- Pod is OOMKilled → call describe_pod + get_resource_quotas + get_events
-- Pod is Pending → call get_node_health + get_pvc_status + get_events
-- Deployment has 0 ready replicas → call get_pod_status(same namespace) + get_events
+- Pod has high restarts → describe_pod (get termination reason) → rag_search(query=termination reason or error) → get_events
+- Pod is OOMKilled → describe_pod (confirm OOMKilled + memory limits) → rag_search(query="OOMKilled <pod-name or component>") → get_resource_quotas → get_events
+- Pod is CrashLoopBackOff → describe_pod (get last exit code + reason) → rag_search(query="CrashLoopBackOff <component name>") → get_events
+- Pod is Pending → get_node_health + get_pvc_status + get_events → rag_search(query="pod pending <reason from events>")
+- Pod is not Ready (ready < total containers) → describe_pod → rag_search(query="<container name> not ready") → get_events
+- Deployment has 0 ready replicas → get_pod_status(same namespace) + get_events → rag_search if a known error is found
 - Events show ImagePullBackOff → note air-gapped environment, no external registry access
+- ANY pod error or abnormal state → ALWAYS call rag_search after describe_pod to check for known issues in the documentation
 - User asks total CPU/memory for a namespace → call get_namespace_resource_summary(namespace=...) — ONE call, do NOT loop describe_pod
 - User asks about DB tables, data, or SQL → call exec_db_query immediately with container="db", do NOT narrate
 - exec_db_query returns error with "available containers: ..." → immediately re-call exec_db_query with container= set to the DB container from that list

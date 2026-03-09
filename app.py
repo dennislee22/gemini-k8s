@@ -354,11 +354,23 @@ def get_doc_stats() -> dict:
     return {"total_chunks": total, "files": len(by_src), "by_type": by_type}
 
 RAG_TOOLS = {
-    "search_documentation": {
+    "rag_search": {
         "fn": rag_retrieve,
-        "description": "Search the internal knowledge base for known issues, runbooks, and guidelines.",
+        "description": (
+            "Search the internal knowledge base for known issues, runbooks, troubleshooting guides, "
+            "and operational best practices. "
+            "ALWAYS call this after describe_pod when a pod is unhealthy, crashing, OOMKilled, "
+            "CrashLoopBackOff, Pending, or not Ready — to check whether a known fix is documented. "
+            "Use the specific error or component name as the query. "
+            "Examples: "
+            "rag_search(query='CrashLoopBackOff cdp-cadence') "
+            "rag_search(query='OOMKilled sense-db memory limit') "
+            "rag_search(query='pod pending PVC not bound') "
+            "rag_search(query='ImagePullBackOff air-gapped') "
+        ),
         "parameters": {
-            "query": {"type": "string"},
+            "query": {"type": "string",
+                      "description": "Search query — use specific error names, component names, or symptoms."},
             "top_k": {"type": "integer", "default": 5},
             "doc_type": {"type": "string", "default": None},
         },

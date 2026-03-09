@@ -1530,7 +1530,7 @@ function appendAi(text, tools, iters, elapsed, statusUpdates, isClarification){
   const clean  = formatResponse(text);
   const unique = [...new Set(tools||[])];
   const badges = unique.map(t=>
-    '<span class="tbadge">'+(t==='search_documentation'?'📚':'\u2699\uFE0F')+' '+esc(t)+'</span>'
+    '<span class="tbadge">'+(t==='rag_search'?'📚':'\u2699\uFE0F')+' '+esc(t)+'</span>'
   ).join('');
   const toolRow = unique.length
     ? '<div class="ai-tools"><span class="tmeta">called:</span>'+badges
