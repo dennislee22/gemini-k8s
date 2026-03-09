@@ -1904,7 +1904,13 @@ K8S_TOOLS: dict = {
     },
     "describe_pod": {
         "fn":          describe_pod,
-        "description": "Get detailed info about a specific pod including container states and resource limits.",
+        "description": (
+            "Get detailed info about a specific pod: container states, restart count, "
+            "last termination reason (e.g. OOMKilled, Error), and CPU/memory requests and limits per container. "
+            "Use this for: 'what are the resource limits for pod X', 'why did pod X crash', "
+            "'what is the memory limit for pod X', or any OOMKilled diagnosis. "
+            "This is the ONLY tool that shows per-pod resource limits and termination reasons."
+        ),
         "parameters":  {
             "pod_name":  {"type": "string"},
             "namespace": {"type": "string", "default": "default"},

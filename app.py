@@ -1131,6 +1131,12 @@ async def run_agent_streaming(user_message: str):
             if kind == "on_chat_model_start":
                 pass
 
+            elif kind == "on_chain_start" and name == "llm":
+                itr_hint = iteration_count + 1
+                txt = f"🧠 Loop {itr_hint} — LLM thinking…"
+                yield _sse({"type": "iteration", "iteration": itr_hint,
+                            "text": txt, "has_tool_calls": None})
+
             elif kind == "on_tool_start":
                 tool_name  = event.get("name", "unknown_tool")
                 tool_input = event.get("data", {}).get("input", {})
@@ -1160,15 +1166,30 @@ async def run_agent_streaming(user_message: str):
                 output       = event.get("data", {}).get("output", {})
                 node_updates = output.get("status_updates", [])
                 iteration_count = output.get("iteration", iteration_count)
+                has_tool_calls = False
                 for m in output.get("messages", []):
                     tc  = getattr(m, "tool_calls", None)
                     txt = getattr(m, "content", "") or ""
+                    if tc:
+                        has_tool_calls = True
                     if txt and not tc:
                         final_answer = txt
                 logger.info(
                     f"[REQ:{req_id}] llm_chain_end  itr={iteration_count}"
                     f"  has_answer={bool(final_answer)}  updates={node_updates}"
                 )
+
+                # ── Emit iteration stage event ────────────────────────────────
+                # This is what lets the UI show the loop timeline in real time.
+                if has_tool_calls:
+                    itr_txt = f"🔄 Loop {iteration_count} — LLM called tools, waiting for results…"
+                elif final_answer:
+                    itr_txt = f"✍️ Loop {iteration_count} — LLM synthesising final answer…"
+                else:
+                    itr_txt = f"🔄 Loop {iteration_count} — LLM processing…"
+                yield _sse({"type": "iteration", "iteration": iteration_count,
+                            "text": itr_txt, "has_tool_calls": has_tool_calls})
+
                 for u in node_updates:
                     if u not in all_updates:
                         all_updates.append(u)

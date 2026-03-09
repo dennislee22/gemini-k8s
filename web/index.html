@@ -1464,28 +1464,83 @@ function showThinking(updates){
   scrollBot();
 }
 
-function _renderThinkingContent(updates, showDots){
+function _renderAgentStatus(updates){
   if(!thinkEl) return;
-  let h = '<div class="s-label">AGENT STATUS — processing</div>';
-  updates.forEach((u,i)=>{
-    const cur = i===updates.length-1;
-    h += '<div class="s-line'+(cur?' cur':'')+'"><span>'+(cur?'›':'✓')+'</span> '+esc(u)+'</div>';
+
+  // Group updates into loop sections for display
+  // Each iteration event starts a new loop block
+  let sections = [];
+  let current = null;
+
+  updates.forEach(u => {
+    if(u.type === 'iteration'){
+      if(current) sections.push(current);
+      current = {iteration: u.iteration, label: u.text, items: [], has_tool_calls: u.has_tool_calls};
+    } else if(current) {
+      current.items.push(u);
+    } else {
+      // Pre-loop status (model info etc)
+      if(!sections.length) sections.push({iteration: 0, label: null, items: []});
+      sections[0].items.push(u);
+    }
   });
-  if(showDots){
+  if(current) sections.push(current);
+
+  const lastSection = sections[sections.length - 1];
+  let h = '<div class="s-label">AGENT STATUS — processing</div>';
+
+  sections.forEach((sec, si) => {
+    const isLastSec = si === sections.length - 1;
+
+    if(sec.label){
+      // Loop header — style differently based on whether it called tools or is synthesising
+      const isSynth = sec.label.includes('synthesising');
+      const isThinking = sec.label.includes('thinking');
+      const loopColor = isThinking ? 'var(--dimText)' : isSynth ? 'var(--accent)' : 'var(--accent)';
+      h += `<div class="s-loop-header" style="color:${loopColor};margin-top:6px;font-size:11px;font-weight:600;letter-spacing:.05em">${esc(sec.label)}</div>`;
+    }
+
+    sec.items.forEach((item, ii) => {
+      const isLast = isLastSec && ii === sec.items.length - 1;
+      const isTool = item.type === 'tool';
+      const icon = isTool ? '🔧' : '✓';
+      h += `<div class="s-line${isLast?' cur':''}" style="margin-left:${sec.label?'12px':'0'}">` +
+           `<span>${isLast && isLastSec ? '›' : icon}</span> ${esc(item.text)}</div>`;
+    });
+
+    // Show dots after the last item of the last section
+    if(isLastSec && sec.items.length === 0 && sec.label){
+      h += '<div class="sdots" style="margin-left:12px">'
+         + '<div class="sdot" style="animation-delay:0s"></div>'
+         + '<div class="sdot" style="animation-delay:.2s"></div>'
+         + '<div class="sdot" style="animation-delay:.4s"></div>'
+         + '</div>';
+    }
+  });
+
+  // Always show animated dots at bottom while processing
+  if(lastSection && lastSection.items.length > 0){
     h += '<div class="sdots">'
        + '<div class="sdot" style="animation-delay:0s"></div>'
        + '<div class="sdot" style="animation-delay:.2s"></div>'
        + '<div class="sdot" style="animation-delay:.4s"></div>'
        + '</div>';
   }
+
   thinkEl.innerHTML = h;
   scrollBot();
 }
 
+// Keep old name as alias for any remaining callers
+function _renderThinkingContent(updates, showDots){
+  // Convert old string array format to new object format
+  const converted = updates.map(u => typeof u === 'string' ? {type:'status', text:u} : u);
+  _renderAgentStatus(converted);
+}
+
 function appendStatusLine(text, liveUpdates){
-  // Update the live status box in place rather than rebuilding from scratch
   if(!thinkEl) showThinking([text]);
-  else _renderThinkingContent(liveUpdates, true);
+  else _renderAgentStatus(liveUpdates);
 }
 
 function removeThinking(){ if(thinkEl){thinkEl.remove();thinkEl=null;} }
@@ -1622,26 +1677,29 @@ async function sendMessage(override){
         catch{ continue; }
 
         if(payload.type === 'status'){
-          liveUpdates.push(payload.text);
-          appendStatusLine(payload.text, liveUpdates);
+          liveUpdates.push({type:'status', text: payload.text});
+          _renderAgentStatus(liveUpdates);
 
         } else if(payload.type === 'tool'){
-          liveUpdates.push(payload.text);
-          appendStatusLine(payload.text, liveUpdates);
+          liveUpdates.push({type:'tool', text: payload.text});
+          _renderAgentStatus(liveUpdates);
+
+        } else if(payload.type === 'iteration'){
+          // Loop stage marker — shown as a loop header in the status box
+          liveUpdates.push({type:'iteration', text: payload.text, iteration: payload.iteration, has_tool_calls: payload.has_tool_calls});
+          _renderAgentStatus(liveUpdates);
 
         } else if(payload.type === 'heartbeat'){
-          // Server-sent keep-alive — update the status box with the warning
           const timeoutSec = payload.timeout || 300;
           const remaining  = timeoutSec - (payload.elapsed || 0);
           const hbText     = `⏳ Still processing… (${payload.elapsed}s elapsed, timeout in ${remaining}s)`;
-          // Replace the last heartbeat line rather than accumulating many
           const lastIdx = liveUpdates.length - 1;
-          if(lastIdx >= 0 && liveUpdates[lastIdx].startsWith('⏳')){
-            liveUpdates[lastIdx] = hbText;
+          if(lastIdx >= 0 && liveUpdates[lastIdx].text && liveUpdates[lastIdx].text.startsWith('⏳')){
+            liveUpdates[lastIdx] = {type:'status', text: hbText};
           } else {
-            liveUpdates.push(hbText);
+            liveUpdates.push({type:'status', text: hbText});
           }
-          _renderThinkingContent(liveUpdates, true);
+          _renderAgentStatus(liveUpdates);
 
         } else if(payload.type === 'result'){
           _stopElapsedCounter();
