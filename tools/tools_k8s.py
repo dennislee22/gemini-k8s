@@ -2125,32 +2125,93 @@ def _find_db_credentials(namespace: str, pod_name: str) -> dict:
     return creds
 
 
-def _detect_db_type(pod_name: str, namespace: str) -> str | None:
+def _detect_db_type(pod_name: str, namespace: str,
+                    container_hint: str = "") -> str | None:
     """
-    Detect whether a pod runs MySQL/MariaDB or PostgreSQL by inspecting
-    container image names and common env var names.
+    Detect whether a pod runs MySQL/MariaDB or PostgreSQL.
+    Checks in order: image name → container name → env var names → 'db'-named container fallback.
     Returns 'mysql', 'postgres', or None.
+    If container_hint is given, check that container first.
     """
     try:
         pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
     except ApiException:
         return None
 
-    for container in (pod.spec.containers or []):
-        image = (container.image or "").lower()
+    containers = pod.spec.containers or []
+
+    # If a specific container is hinted, check it first
+    if container_hint:
+        containers = sorted(containers,
+                            key=lambda c: 0 if c.name == container_hint else 1)
+
+    # Pass 1: image-based detection (most reliable)
+    for c in containers:
+        image = (c.image or "").lower()
         if any(x in image for x in ("mysql", "mariadb", "percona")):
             return "mysql"
-        if any(x in image for x in ("postgres", "postgresql", "pg:")):
+        if any(x in image for x in ("postgres", "postgresql", "pg:", "/pg-", "-pg-", "pgbouncer")):
             return "postgres"
-        # Check env vars as fallback
-        for env in (container.env or []):
+
+    # Pass 2: container name hints
+    for c in containers:
+        cname = (c.name or "").lower()
+        if any(x in cname for x in ("mysql", "mariadb")):
+            return "mysql"
+        if any(x in cname for x in ("postgres", "postgresql")):
+            return "postgres"
+
+    # Pass 3: env var name hints (POSTGRES_* / MYSQL_* / PG* are definitive)
+    for c in containers:
+        for env in (c.env or []):
             name_lc = env.name.lower()
-            if "mysql" in name_lc or "mariadb" in name_lc:
-                return "mysql"
-            if "postgres" in name_lc or "postgresql" in name_lc:
+            if name_lc.startswith(("postgres", "pgdata", "pguser", "pgpassword")):
                 return "postgres"
+            if name_lc.startswith(("mysql", "mariadb")):
+                return "mysql"
+
+    # Pass 4: container literally named "db" — default to postgres
+    # (most common in Cloudera ECS and similar deployments)
+    for c in containers:
+        cname = (c.name or "").lower()
+        if cname in ("db", "database"):
+            return "postgres"
 
     return None
+
+
+def _find_db_container(pod_name: str, namespace: str, db_type: str) -> str:
+    """
+    Return the name of the container inside the pod that runs the DB CLI.
+    For multi-container pods, picks the container whose image or name best
+    matches the db_type. Falls back to the first container.
+    """
+    try:
+        pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
+    except ApiException:
+        return ""
+
+    _MYSQL_HINTS    = ("mysql", "mariadb", "percona")
+    _POSTGRES_HINTS = ("postgres", "postgresql", "pg:", "/pg-", "-pg-")
+
+    hints = _MYSQL_HINTS if db_type == "mysql" else _POSTGRES_HINTS
+
+    # 1st pass: container whose image matches
+    for c in (pod.spec.containers or []):
+        if any(h in (c.image or "").lower() for h in hints):
+            return c.name
+
+    # 2nd pass: container whose name matches (e.g. "db", "postgres", "mysql")
+    for c in (pod.spec.containers or []):
+        cname = (c.name or "").lower()
+        if db_type == "mysql" and any(h in cname for h in ("mysql", "mariadb", "db")):
+            return c.name
+        if db_type == "postgres" and any(h in cname for h in ("postgres", "pg", "db")):
+            return c.name
+
+    # Fallback: first container
+    containers = pod.spec.containers or []
+    return containers[0].name if containers else ""
 
 
 def _find_db_pod(namespace: str, hint: str = "") -> tuple[str | None, str | None]:
@@ -2183,16 +2244,19 @@ def _find_db_pod(namespace: str, hint: str = "") -> tuple[str | None, str | None
 
 
 def exec_db_query(namespace: str, sql: str,
-                  pod_name: str = "", database: str = "") -> str:
+                  pod_name: str = "", database: str = "",
+                  container: str = "") -> str:
     """
     Execute a read-only SQL query inside a database pod in the given namespace.
 
     Workflow:
       1. Locate a running DB pod (MySQL/MariaDB or PostgreSQL) — auto-detected
          from container image. Use pod_name to target a specific pod.
-      2. Retrieve DB credentials (user, password, database name) from the pod's
+      2. Identify the correct container inside the pod (e.g. "db" in multi-container pods).
+         Use container= to override auto-detection.
+      3. Retrieve DB credentials (user, password, database name) from the pod's
          environment variables, secretRefs, and configMapRefs.
-      3. Run the SQL via kubectl exec using the K8s stream API.
+      4. Run the SQL via kubectl exec using the K8s stream API.
 
     Only SELECT and other read-only statements are permitted.
     INSERT / UPDATE / DELETE / DROP / ALTER / TRUNCATE are blocked.
@@ -2207,6 +2271,9 @@ def exec_db_query(namespace: str, sql: str,
         Specific pod name to target. If empty, the first running DB pod is used.
     database : str, optional
         Database/schema name to connect to. Overrides auto-detected value.
+    container : str, optional
+        Container name inside the pod. If empty, auto-detected from image/name.
+        Use this when the pod has multiple containers and auto-detection picks wrong one.
     """
     if not _ALLOW_DB_EXEC:
         return "[ERROR] DB query execution is disabled. Set ALLOW_DB_EXEC=true to enable."
@@ -2223,10 +2290,20 @@ def exec_db_query(namespace: str, sql: str,
 
     # ── Step 1: find the DB pod ───────────────────────────────────────────────
     if pod_name:
-        db_type = _detect_db_type(pod_name, namespace)
+        # Strip namespace/ prefix if LLM passes it
+        if "/" in pod_name:
+            pod_name = pod_name.split("/", 1)[1]
+        db_type = _detect_db_type(pod_name, namespace, container_hint=container)
         if not db_type:
-            return (f"[ERROR] Could not detect DB type for pod '{pod_name}' in '{namespace}'. "
-                    "Ensure it runs a MySQL/MariaDB or PostgreSQL image.")
+            # List available containers to help diagnose
+            try:
+                pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
+                cnames = [c.name for c in (pod.spec.containers or [])]
+                return (f"[ERROR] Could not detect DB type for pod '{pod_name}' in '{namespace}'. "
+                        f"Available containers: {', '.join(cnames)}. "
+                        f"Re-call with container='<name>' set to the DB container.")
+            except ApiException:
+                return (f"[ERROR] Pod '{pod_name}' not found in namespace '{namespace}'.")
     else:
         pod_name, db_type = _find_db_pod(namespace)
         if not pod_name:
@@ -2235,14 +2312,21 @@ def exec_db_query(namespace: str, sql: str,
 
     _log.info(f"[exec_db_query] pod={namespace}/{pod_name}  db_type={db_type}")
 
-    # ── Step 2: gather credentials ────────────────────────────────────────────
+    # ── Step 2: find the correct container inside the pod ────────────────────
+    if container:
+        container_name = container  # explicit override
+    else:
+        container_name = _find_db_container(pod_name, namespace, db_type)
+    _log.info(f"[exec_db_query] container={container_name!r}")
+
+    # ── Step 3: gather credentials ────────────────────────────────────────────
     creds = _find_db_credentials(namespace, pod_name)
     db_name = database or creds.get("database") or ""
 
     _log.debug(f"[exec_db_query] creds found: user={creds['user']}  "
                f"db={db_name}  host={creds['host']}")
 
-    # ── Step 3: build the exec command ───────────────────────────────────────
+    # ── Step 4: build the exec command ───────────────────────────────────────
     from kubernetes.stream import stream as _k8s_stream
 
     safe_sql = sql.replace("'", "'\\''")  # escape single quotes for shell
@@ -2253,7 +2337,6 @@ def exec_db_query(namespace: str, sql: str,
         host     = creds["host"] or "127.0.0.1"
         port     = creds["port"] or "3306"
 
-        # Build mysql CLI command — -e flag runs non-interactively
         pass_arg = f"-p'{password}'" if password else ""
         db_arg   = db_name if db_name else ""
         cmd = (
@@ -2266,36 +2349,59 @@ def exec_db_query(namespace: str, sql: str,
     elif db_type == "postgres":
         user     = creds["user"] or "postgres"
         password = creds["password"] or ""
-        host     = creds["host"] or "127.0.0.1"
-        port     = creds["port"] or "5432"
         db_name  = db_name or user  # postgres default db = username
 
-        # PGPASSWORD avoids interactive password prompt
-        cmd = (
-            f"PGPASSWORD='{password}' psql -U {user} -h {host} -p {port} "
-            f"-d {db_name} --no-password -t -A -c '{safe_sql}'"
-        )
+        # Try local Unix socket first (peer/trust auth — most common inside containers).
+        # If host is explicitly set in env vars, use TCP instead.
+        host = creds.get("host") or ""
+        port = creds.get("port") or "5432"
+
+        if host and host not in ("localhost", "127.0.0.1", "::1"):
+            # Remote TCP connection
+            pg_env  = f"PGPASSWORD='{password}' " if password else ""
+            cmd = (
+                f"{pg_env}psql -U {user} -h {host} -p {port} "
+                f"-d {db_name} --no-password -t -A -c '{safe_sql}'"
+            )
+        else:
+            # Local socket — try peer auth first; PGPASSWORD set in case password auth is needed
+            pg_env  = f"PGPASSWORD='{password}' " if password else ""
+            db_flag = f"-d {db_name}" if db_name else ""
+            user_flag = f"-U {user}" if user else ""
+            cmd = (
+                f"{pg_env}psql {user_flag} {db_flag} "
+                f"--no-password -t -A -c '{safe_sql}' 2>&1 || "
+                # fallback: try without -U (use OS user inside container)
+                f"psql {db_flag} -t -A -c '{safe_sql}'"
+            )
         exec_cmd = ["/bin/sh", "-c", cmd]
 
     else:
         return f"[ERROR] Unsupported DB type: {db_type}"
 
-    # ── Step 4: execute via K8s stream API ───────────────────────────────────
+    # ── Step 5: execute via K8s stream API ───────────────────────────────────
+    stream_kwargs = dict(
+        stderr=True,
+        stdin=False,
+        stdout=True,
+        tty=False,
+        _preload_content=True,
+    )
+    # Pass container name for multi-container pods — required by the K8s API
+    if container_name:
+        stream_kwargs["container"] = container_name
+
     try:
         resp = _k8s_stream(
             _core.connect_get_namespaced_pod_exec,
             pod_name,
             namespace,
             command=exec_cmd,
-            stderr=True,
-            stdin=False,
-            stdout=True,
-            tty=False,
-            _preload_content=True,
+            **stream_kwargs,
         )
         output = resp.strip() if isinstance(resp, str) else str(resp).strip()
     except ApiException as e:
-        return f"[ERROR] K8s exec failed: {_safe_reason(e)}"
+        return f"[ERROR] K8s exec failed (pod={pod_name}, container={container_name}): {_safe_reason(e)}"
     except Exception as exc:
         return f"[ERROR] Unexpected exec error: {exc}"
 
@@ -2555,22 +2661,22 @@ K8S_TOOLS["exec_db_query"] = {
     "fn":          exec_db_query,
     "description": (
         "Execute a read-only SQL query inside a running database pod in a Kubernetes namespace. "
-        "Supports MySQL, MariaDB, and PostgreSQL — auto-detected from the container image. "
+        "Supports MySQL, MariaDB, and PostgreSQL — auto-detected from the container image or name. "
+        "For multi-container pods (e.g. a pod with containers: upgrade-db, k8tz, fluent-bit, db), "
+        "set container='db' to target the correct database container explicitly. "
         "Credentials (username, password, database name) are automatically discovered from the "
         "pod's environment variables, Kubernetes Secrets, and ConfigMaps — no manual credential input needed. "
         "Use this tool for any query involving database contents, user accounts, passwords stored in DB, "
         "table data, or schema inspection. "
         "ONLY read-only SQL is permitted (SELECT, SHOW, DESCRIBE, EXPLAIN). "
         "INSERT / UPDATE / DELETE / DROP / ALTER / TRUNCATE are blocked. "
-        "WORKFLOW: "
-        "1. If the user asks about a DB user or password, first call get_secrets to check K8s secrets. "
-        "2. If the answer is not in secrets, call exec_db_query with an appropriate SELECT query. "
-        "3. Auto-detect DB type — do NOT ask the user what database they use. "
+        "WORKFLOW for 'access db-0 of cmlwb1 and find tables': "
+        "  exec_db_query(namespace='cmlwb1', pod_name='db-0', container='db', sql='SHOW TABLES') "
+        "If the tool returns an error listing available containers, re-call with the correct container= value. "
         "Example queries: "
+        "\"SHOW TABLES\", \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()\", "
         "\"SELECT user, authentication_string FROM mysql.user WHERE user='x'\", "
-        "\"SELECT usename, passwd FROM pg_shadow WHERE usename='x'\", "
-        "\"SHOW DATABASES\", "
-        "\"SELECT * FROM users LIMIT 10\""
+        "\"SELECT usename, passwd FROM pg_shadow WHERE usename='x'\""
     ),
     "parameters": {
         "namespace": {
@@ -2581,19 +2687,16 @@ K8S_TOOLS["exec_db_query"] = {
             "type": "string",
             "description": (
                 "Read-only SQL query to execute. "
-                "Examples: "
-                "\"SELECT user, host FROM mysql.user\", "
-                "\"SELECT usename FROM pg_catalog.pg_user\", "
-                "\"SHOW TABLES\", "
-                "\"DESCRIBE my_table\""
+                "Examples: \"SHOW TABLES\", \"SELECT user, host FROM mysql.user\", "
+                "\"SELECT usename FROM pg_catalog.pg_user\", \"DESCRIBE my_table\""
             ),
         },
         "pod_name": {
             "type": "string",
             "default": "",
             "description": (
-                "Optional: specific DB pod name. Leave empty to auto-detect the first "
-                "running MySQL/MariaDB/PostgreSQL pod in the namespace."
+                "Optional: specific DB pod name (e.g. 'db-0'). "
+                "Leave empty to auto-detect the first running DB pod in the namespace."
             ),
         },
         "database": {
@@ -2602,6 +2705,15 @@ K8S_TOOLS["exec_db_query"] = {
             "description": (
                 "Optional: database/schema name to connect to. "
                 "Leave empty to use the value auto-discovered from the pod's environment."
+            ),
+        },
+        "container": {
+            "type": "string",
+            "default": "",
+            "description": (
+                "Optional: container name inside the pod (e.g. 'db'). "
+                "Required for multi-container pods where the DB container is not the first one. "
+                "If the tool errors with 'available containers: ...', set this to the DB container name."
             ),
         },
     },
