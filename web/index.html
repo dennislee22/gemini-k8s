@@ -569,7 +569,7 @@ button{cursor:pointer;font-family:inherit}
       <!-- ── README pane ───────────────────────────────────────────────── -->
       <div id="readme-pane">
 
-        <h1><img src="/static/chatbot-icon.svg" width="26" height="26" style="vertical-align:middle;margin-right:6px"><img src="/static/k8s-logo.svg" width="24" height="24" style="vertical-align:middle;margin-right:8px">Cloudera ECS AI Ops Chatbot</h1>
+        <h1><img src="/static/chatbot-icon.svg" width="26" height="26" style="vertical-align:middle;margin-right:6px;filter:brightness(0) invert(1)"><img src="/static/k8s-logo.svg" width="24" height="24" style="vertical-align:middle;margin-right:8px">Cloudera ECS AI Ops Chatbot</h1>
         <p>An air-gapped Kubernetes operations assistant for Cloudera ECS, powered by a local LLM (Qwen3-8B), LangGraph agentic loop, and ChromaDB RAG.</p>
 
         <div class="tip">&#128161; <strong>Quick start:</strong> Type a question in the <strong>ECS AI Ops</strong> tab — e.g. <em>"is my cluster having any issues?"</em> — and press <strong>Enter</strong>.</div>
@@ -682,7 +682,7 @@ python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
         <table>
           <tr><th>Setup</th><th>RAM</th><th>VRAM</th><th>Speed</th></tr>
           <tr><td>CPU only, 8-core</td><td>32 GB</td><td>—</td><td>~6–10 tok/s</td></tr>
-          <tr><td>GPU (recommended) — <strong>Qwen3-8B</strong> (tested and recommended for its tool invocation capability)</td><td>32 GB</td><td>~20 GB</td><td>~30–60 tok/s</td></tr>
+          <tr><td>GPU, <strong>Qwen3-8B</strong> (tested and recommended for its tool invocation capability)</td><td>32 GB</td><td>~20 GB</td><td>~30–60 tok/s</td></tr>
         </table>
 
         <!-- ── Security ───────────────────────────────────────────────── -->

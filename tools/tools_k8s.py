@@ -302,6 +302,11 @@ def get_pod_logs(pod_name: str, namespace: str = "default",
 
 
 def describe_pod(pod_name: str, namespace: str = "default") -> str:
+    # Strip accidental "namespace/podname" format the LLM sometimes passes
+    if "/" in pod_name:
+        parts = pod_name.split("/", 1)
+        if len(parts) == 2:
+            pod_name = parts[1]
     try:
         pod   = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
         lines = [
@@ -1045,7 +1050,7 @@ def get_cluster_role_bindings() -> str:
 
 
 def get_namespace_status() -> str:
-    """List ALL namespaces — uses the Python k8s client directly against the
+    """List ALL namespaces with their pod count — uses the Python k8s client directly against the
     remote cluster API server. No local kubectl binary required."""
     try:
         items, _cont = [], None
@@ -1061,11 +1066,26 @@ def get_namespace_status() -> str:
                 break
         if not items:
             return "No namespaces found."
-        active = sum(1 for ns in items if (ns.status.phase or "Active") == "Active")
-        lines = [f"Total namespaces: {len(items)} ({active} Active)."]
+
+        # Fetch pod counts per namespace in one call per namespace
+        ns_pod_counts: dict = {}
         for ns in items:
+            ns_name = ns.metadata.name
+            try:
+                pods = _core.list_namespaced_pod(namespace=ns_name, limit=1000)
+                ns_pod_counts[ns_name] = len(pods.items)
+            except ApiException:
+                ns_pod_counts[ns_name] = -1
+
+        active = sum(1 for ns in items if (ns.status.phase or "Active") == "Active")
+        lines = [f"Total namespaces: {len(items)} ({active} Active).",
+                 f"{'NAMESPACE':<40} {'STATUS':<10} {'PODS':>5}"]
+        for ns in items:
+            ns_name = ns.metadata.name
+            count   = ns_pod_counts.get(ns_name, 0)
+            count_s = str(count) if count >= 0 else "err"
             lines.append(
-                f"  {ns.metadata.name:<40} {ns.status.phase or 'Active'}"
+                f"  {ns_name:<38} {ns.status.phase or 'Active':<10} {count_s:>5}"
             )
         return "\n".join(lines)
     except ApiException as e:
@@ -1873,6 +1893,118 @@ def kubectl_exec(command: str) -> str:
         out = out[:_KUBECTL_MAX_OUT] + f"\n...[output truncated at {_KUBECTL_MAX_OUT} chars]"
     return out
 
+# ── Namespace-level resource summary ─────────────────────────────────────────
+# Aggregates CPU and memory requests/limits across ALL pods in a namespace
+# in a single tool call — avoids calling describe_pod on every pod individually.
+
+def _parse_cpu_to_millicores(cpu_str: str) -> int:
+    """Convert a K8s CPU string to millicores (int). Returns 0 if unparseable."""
+    if not cpu_str or cpu_str in ("none", "<none>", "0"):
+        return 0
+    cpu_str = cpu_str.strip()
+    try:
+        if cpu_str.endswith("m"):
+            return int(cpu_str[:-1])
+        # Whole cores (e.g. "1", "2.5")
+        return int(float(cpu_str) * 1000)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _parse_mem_to_mib(mem_str: str) -> float:
+    """Convert a K8s memory string to MiB (float). Returns 0 if unparseable."""
+    if not mem_str or mem_str in ("none", "<none>", "0"):
+        return 0.0
+    mem_str = mem_str.strip()
+    try:
+        _UNITS = {
+            "Ki": 1 / 1024,
+            "Mi": 1.0,
+            "Gi": 1024.0,
+            "Ti": 1024.0 * 1024,
+            "K":  1 / 1024,
+            "M":  1.0,
+            "G":  1024.0,
+        }
+        for suffix, factor in _UNITS.items():
+            if mem_str.endswith(suffix):
+                return float(mem_str[: -len(suffix)]) * factor
+        return float(mem_str) / (1024 * 1024)  # raw bytes → MiB
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def get_namespace_resource_summary(namespace: str) -> str:
+    """
+    Aggregate CPU and memory requests/limits for ALL pods in a namespace.
+    Returns a summary with total requested CPU (millicores + cores) and memory (MiB),
+    plus per-pod breakdown. Use this for questions like:
+    - "what is the total CPU request for all pods in namespace X?"
+    - "how much memory is requested in namespace X?"
+    - "count total cpu/memory requests in namespace X"
+    """
+    try:
+        pods = _core.list_namespaced_pod(namespace=namespace, limit=1000)
+    except ApiException as e:
+        return f"[ERROR] {_safe_reason(e)}"
+
+    if not pods.items:
+        return f"No pods found in namespace '{namespace}'."
+
+    total_cpu_req_m  = 0
+    total_cpu_lim_m  = 0
+    total_mem_req_mib = 0.0
+    total_mem_lim_mib = 0.0
+    pod_lines = []
+
+    for pod in pods.items:
+        pod_cpu_req_m  = 0
+        pod_cpu_lim_m  = 0
+        pod_mem_req_mib = 0.0
+        pod_mem_lim_mib = 0.0
+        for c in (pod.spec.containers or []):
+            req = (c.resources.requests or {}) if c.resources else {}
+            lim = (c.resources.limits   or {}) if c.resources else {}
+            pod_cpu_req_m   += _parse_cpu_to_millicores(req.get("cpu",    "0"))
+            pod_cpu_lim_m   += _parse_cpu_to_millicores(lim.get("cpu",    "0"))
+            pod_mem_req_mib += _parse_mem_to_mib(req.get("memory", "0"))
+            pod_mem_lim_mib += _parse_mem_to_mib(lim.get("memory", "0"))
+
+        total_cpu_req_m   += pod_cpu_req_m
+        total_cpu_lim_m   += pod_cpu_lim_m
+        total_mem_req_mib += pod_mem_req_mib
+        total_mem_lim_mib += pod_mem_lim_mib
+
+        cpu_req_s = f"{pod_cpu_req_m}m" if pod_cpu_req_m else "none"
+        mem_req_s = f"{pod_mem_req_mib:.0f}Mi" if pod_mem_req_mib else "none"
+        pod_lines.append(
+            f"  {pod.metadata.name}: cpu_req={cpu_req_s}  mem_req={mem_req_s}"
+        )
+
+    def _fmt_cpu(m: int) -> str:
+        if m == 0:
+            return "0m (none set)"
+        return f"{m}m ({m/1000:.3f} cores)"
+
+    def _fmt_mem(mib: float) -> str:
+        if mib == 0:
+            return "0Mi (none set)"
+        return f"{mib:.0f}Mi ({mib/1024:.2f}Gi)"
+
+    lines = [
+        f"Resource summary for namespace '{namespace}' ({len(pods.items)} pods):",
+        f"",
+        f"  TOTAL CPU  requested : {_fmt_cpu(total_cpu_req_m)}",
+        f"  TOTAL CPU  limit     : {_fmt_cpu(total_cpu_lim_m)}",
+        f"  TOTAL MEM  requested : {_fmt_mem(total_mem_req_mib)}",
+        f"  TOTAL MEM  limit     : {_fmt_mem(total_mem_lim_mib)}",
+        f"",
+        f"Per-pod CPU/memory requests:",
+    ] + pod_lines
+
+    return "\n".join(lines)
+
+
 # ── DB Query via pod exec ─────────────────────────────────────────────────────
 # Read-only SQL queries executed inside database pods.
 # Supports MySQL/MariaDB and PostgreSQL auto-detection.
@@ -2361,8 +2493,27 @@ K8S_TOOLS: dict = {
 
     "get_namespace_status": {
         "fn":          get_namespace_status,
-        "description": "List all namespaces and their phase. ALWAYS use this when the user asks 'how many namespaces', 'list namespaces', or wants a namespace count.",
+        "description": "List all namespaces with their status and pod count. ALWAYS use this when the user asks 'how many namespaces', 'list namespaces', 'namespaces with number of pods', or wants a namespace count.",
         "parameters":  {},
+    },
+    "get_namespace_resource_summary": {
+        "fn":          get_namespace_resource_summary,
+        "description": (
+            "Aggregate CPU and memory requests/limits for ALL pods in a namespace in a single call. "
+            "Returns total requested CPU (millicores and cores) and memory (MiB/GiB) for the namespace, "
+            "plus a per-pod breakdown. "
+            "Use this for: 'total cpu request for all pods in namespace X', "
+            "'how much memory is requested in namespace X', "
+            "'count cpu/memory requests in namespace X', "
+            "'sum of cpu requests in X'. "
+            "NEVER call describe_pod in a loop to aggregate resources — always use this tool instead."
+        ),
+        "parameters": {
+            "namespace": {
+                "type": "string",
+                "description": "Kubernetes namespace to summarise resources for.",
+            },
+        },
     },
 }
 
