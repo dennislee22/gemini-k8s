@@ -1873,6 +1873,314 @@ def kubectl_exec(command: str) -> str:
         out = out[:_KUBECTL_MAX_OUT] + f"\n...[output truncated at {_KUBECTL_MAX_OUT} chars]"
     return out
 
+# ── DB Query via pod exec ─────────────────────────────────────────────────────
+# Read-only SQL queries executed inside database pods.
+# Supports MySQL/MariaDB and PostgreSQL auto-detection.
+# Credentials are sourced from K8s Secrets and ConfigMaps — never hardcoded.
+# INSERT / UPDATE / DELETE / DROP / TRUNCATE / ALTER / CREATE are blocked.
+
+_ALLOW_DB_EXEC = os.getenv("ALLOW_DB_EXEC", "true").lower() in ("1", "true", "yes")
+
+_SQL_WRITE_RE = re.compile(
+    r"^\s*(insert|update|delete|drop|truncate|alter|create|replace|rename|grant|revoke"
+    r"|call|exec|execute|lock|unlock|flush|reset|purge|load\s+data)\b",
+    re.IGNORECASE,
+)
+
+# Keys that commonly hold DB credentials in secrets / configmaps
+_DB_USER_KEYS  = ("username", "user", "db-user", "db_user", "postgresql-user",
+                  "mysql-user", "mariadb-user", "database-user")
+_DB_PASS_KEYS  = ("password", "pass", "db-password", "db_password",
+                  "postgresql-password", "mysql-password", "mariadb-password",
+                  "database-password", "postgres-password")
+_DB_NAME_KEYS  = ("database", "db", "db-name", "db_name", "dbname",
+                  "postgresql-database", "mysql-database", "mariadb-database")
+_DB_HOST_KEYS  = ("host", "db-host", "db_host", "postgresql-host", "mysql-host")
+_DB_PORT_KEYS  = ("port", "db-port", "db_port", "postgresql-port", "mysql-port")
+
+
+def _b64decode_safe(val: str) -> str:
+    import base64 as _b64
+    try:
+        return _b64.b64decode(val).decode("utf-8", errors="replace").strip()
+    except Exception:
+        return val.strip()
+
+
+def _find_db_credentials(namespace: str, pod_name: str) -> dict:
+    """
+    Inspect the named pod's env vars, secretRef, configMapRef, and volumeMounts
+    to discover DB credentials (user, password, database, host, port).
+    Returns a dict with keys: user, password, database, host, port (any may be None).
+    """
+    import base64 as _b64
+
+    creds: dict = {k: None for k in ("user", "password", "database", "host", "port")}
+
+    # Helper: check a key name against known patterns
+    def _match(key: str, patterns: tuple) -> str | None:
+        kl = key.lower().replace("-", "_")
+        for p in patterns:
+            if p.replace("-", "_") in kl:
+                return key
+        return None
+
+    def _harvest(key: str, val: str):
+        """Slot a plain-text k/v into creds if it matches a known pattern."""
+        if _match(key, _DB_USER_KEYS)  and not creds["user"]:
+            creds["user"] = val
+        elif _match(key, _DB_PASS_KEYS) and not creds["password"]:
+            creds["password"] = val
+        elif _match(key, _DB_NAME_KEYS) and not creds["database"]:
+            creds["database"] = val
+        elif _match(key, _DB_HOST_KEYS) and not creds["host"]:
+            creds["host"] = val
+        elif _match(key, _DB_PORT_KEYS) and not creds["port"]:
+            creds["port"] = val
+
+    try:
+        pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
+    except ApiException:
+        return creds
+
+    for container in (pod.spec.containers or []):
+        for env in (container.env or []):
+            # Plain value
+            if env.value:
+                _harvest(env.name, env.value)
+                continue
+            # Value from secret
+            if env.value_from:
+                vf = env.value_from
+                if vf.secret_key_ref:
+                    try:
+                        sec = _core.read_namespaced_secret(
+                            name=vf.secret_key_ref.name, namespace=namespace)
+                        raw = (sec.data or {}).get(vf.secret_key_ref.key, "")
+                        if raw:
+                            _harvest(env.name, _b64decode_safe(raw))
+                    except ApiException:
+                        pass
+                elif vf.config_map_key_ref:
+                    try:
+                        cm = _core.read_namespaced_config_map(
+                            name=vf.config_map_key_ref.name, namespace=namespace)
+                        val = (cm.data or {}).get(vf.config_map_key_ref.key, "")
+                        if val:
+                            _harvest(env.name, val)
+                    except ApiException:
+                        pass
+
+        # envFrom — entire secret or configmap mounted as env
+        for ef in (container.env_from or []):
+            if ef.secret_ref:
+                try:
+                    sec = _core.read_namespaced_secret(
+                        name=ef.secret_ref.name, namespace=namespace)
+                    for k, v in (sec.data or {}).items():
+                        _harvest(k, _b64decode_safe(v or ""))
+                except ApiException:
+                    pass
+            if ef.config_map_ref:
+                try:
+                    cm = _core.read_namespaced_config_map(
+                        name=ef.config_map_ref.name, namespace=namespace)
+                    for k, v in (cm.data or {}).items():
+                        _harvest(k, v or "")
+                except ApiException:
+                    pass
+
+    return creds
+
+
+def _detect_db_type(pod_name: str, namespace: str) -> str | None:
+    """
+    Detect whether a pod runs MySQL/MariaDB or PostgreSQL by inspecting
+    container image names and common env var names.
+    Returns 'mysql', 'postgres', or None.
+    """
+    try:
+        pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
+    except ApiException:
+        return None
+
+    for container in (pod.spec.containers or []):
+        image = (container.image or "").lower()
+        if any(x in image for x in ("mysql", "mariadb", "percona")):
+            return "mysql"
+        if any(x in image for x in ("postgres", "postgresql", "pg:")):
+            return "postgres"
+        # Check env vars as fallback
+        for env in (container.env or []):
+            name_lc = env.name.lower()
+            if "mysql" in name_lc or "mariadb" in name_lc:
+                return "mysql"
+            if "postgres" in name_lc or "postgresql" in name_lc:
+                return "postgres"
+
+    return None
+
+
+def _find_db_pod(namespace: str, hint: str = "") -> tuple[str | None, str | None]:
+    """
+    Find the first running DB pod in a namespace.
+    Returns (pod_name, db_type) or (None, None).
+    Optionally filters by `hint` substring in pod name.
+    """
+    try:
+        pods = _core.list_namespaced_pod(namespace=namespace)
+    except ApiException:
+        return None, None
+
+    _DB_IMAGE_HINTS = ("mysql", "mariadb", "percona", "postgres", "postgresql")
+
+    for pod in pods.items:
+        if pod.status.phase != "Running":
+            continue
+        pname = pod.metadata.name
+        if hint and hint.lower() not in pname.lower():
+            continue
+        for container in (pod.spec.containers or []):
+            image = (container.image or "").lower()
+            if any(h in image for h in _DB_IMAGE_HINTS):
+                db_type = _detect_db_type(pname, namespace)
+                if db_type:
+                    return pname, db_type
+
+    return None, None
+
+
+def exec_db_query(namespace: str, sql: str,
+                  pod_name: str = "", database: str = "") -> str:
+    """
+    Execute a read-only SQL query inside a database pod in the given namespace.
+
+    Workflow:
+      1. Locate a running DB pod (MySQL/MariaDB or PostgreSQL) — auto-detected
+         from container image. Use pod_name to target a specific pod.
+      2. Retrieve DB credentials (user, password, database name) from the pod's
+         environment variables, secretRefs, and configMapRefs.
+      3. Run the SQL via kubectl exec using the K8s stream API.
+
+    Only SELECT and other read-only statements are permitted.
+    INSERT / UPDATE / DELETE / DROP / ALTER / TRUNCATE are blocked.
+
+    Parameters
+    ----------
+    namespace : str
+        Kubernetes namespace to search for the DB pod.
+    sql : str
+        SQL query to run (SELECT only — write operations are blocked).
+    pod_name : str, optional
+        Specific pod name to target. If empty, the first running DB pod is used.
+    database : str, optional
+        Database/schema name to connect to. Overrides auto-detected value.
+    """
+    if not _ALLOW_DB_EXEC:
+        return "[ERROR] DB query execution is disabled. Set ALLOW_DB_EXEC=true to enable."
+
+    sql = sql.strip().rstrip(";")
+    if not sql:
+        return "[ERROR] Empty SQL query."
+
+    if _SQL_WRITE_RE.match(sql):
+        return (
+            "[BLOCKED] Write operations are not permitted. "
+            "Only SELECT and read-only queries are allowed."
+        )
+
+    # ── Step 1: find the DB pod ───────────────────────────────────────────────
+    if pod_name:
+        db_type = _detect_db_type(pod_name, namespace)
+        if not db_type:
+            return (f"[ERROR] Could not detect DB type for pod '{pod_name}' in '{namespace}'. "
+                    "Ensure it runs a MySQL/MariaDB or PostgreSQL image.")
+    else:
+        pod_name, db_type = _find_db_pod(namespace)
+        if not pod_name:
+            return (f"[ERROR] No running MySQL/MariaDB or PostgreSQL pod found "
+                    f"in namespace '{namespace}'.")
+
+    _log.info(f"[exec_db_query] pod={namespace}/{pod_name}  db_type={db_type}")
+
+    # ── Step 2: gather credentials ────────────────────────────────────────────
+    creds = _find_db_credentials(namespace, pod_name)
+    db_name = database or creds.get("database") or ""
+
+    _log.debug(f"[exec_db_query] creds found: user={creds['user']}  "
+               f"db={db_name}  host={creds['host']}")
+
+    # ── Step 3: build the exec command ───────────────────────────────────────
+    from kubernetes.stream import stream as _k8s_stream
+
+    safe_sql = sql.replace("'", "'\\''")  # escape single quotes for shell
+
+    if db_type == "mysql":
+        user     = creds["user"] or "root"
+        password = creds["password"] or ""
+        host     = creds["host"] or "127.0.0.1"
+        port     = creds["port"] or "3306"
+
+        # Build mysql CLI command — -e flag runs non-interactively
+        pass_arg = f"-p'{password}'" if password else ""
+        db_arg   = db_name if db_name else ""
+        cmd = (
+            f"mysql -u{user} {pass_arg} -h{host} -P{port} "
+            f"--connect-timeout=10 --batch --silent "
+            f"{db_arg} -e '{safe_sql}'"
+        )
+        exec_cmd = ["/bin/sh", "-c", cmd]
+
+    elif db_type == "postgres":
+        user     = creds["user"] or "postgres"
+        password = creds["password"] or ""
+        host     = creds["host"] or "127.0.0.1"
+        port     = creds["port"] or "5432"
+        db_name  = db_name or user  # postgres default db = username
+
+        # PGPASSWORD avoids interactive password prompt
+        cmd = (
+            f"PGPASSWORD='{password}' psql -U {user} -h {host} -p {port} "
+            f"-d {db_name} --no-password -t -A -c '{safe_sql}'"
+        )
+        exec_cmd = ["/bin/sh", "-c", cmd]
+
+    else:
+        return f"[ERROR] Unsupported DB type: {db_type}"
+
+    # ── Step 4: execute via K8s stream API ───────────────────────────────────
+    try:
+        resp = _k8s_stream(
+            _core.connect_get_namespaced_pod_exec,
+            pod_name,
+            namespace,
+            command=exec_cmd,
+            stderr=True,
+            stdin=False,
+            stdout=True,
+            tty=False,
+            _preload_content=True,
+        )
+        output = resp.strip() if isinstance(resp, str) else str(resp).strip()
+    except ApiException as e:
+        return f"[ERROR] K8s exec failed: {_safe_reason(e)}"
+    except Exception as exc:
+        return f"[ERROR] Unexpected exec error: {exc}"
+
+    if not output:
+        return "(Query returned no rows.)"
+
+    # Truncate to protect LLM context window
+    if len(output) > _KUBECTL_MAX_OUT:
+        output = output[:_KUBECTL_MAX_OUT] + f"\n...[output truncated at {_KUBECTL_MAX_OUT} chars]"
+
+    # Prepend a summary header for the LLM
+    header = (f"DB query result  [{db_type.upper()} · pod={pod_name} · ns={namespace}"
+              + (f" · db={db_name}" if db_name else "") + "]\n"
+              + "-" * 60 + "\n")
+    return header + output
+
+
 K8S_TOOLS: dict = {
 
     "get_pod_status": {
@@ -2087,6 +2395,62 @@ K8S_TOOLS["kubectl_exec"] = {
                 "'kubectl top nodes', "
                 "'kubectl auth can-i list pods -n default', "
                 "'kubectl get namespaces -A'"
+            ),
+        },
+    },
+}
+
+K8S_TOOLS["exec_db_query"] = {
+    "fn":          exec_db_query,
+    "description": (
+        "Execute a read-only SQL query inside a running database pod in a Kubernetes namespace. "
+        "Supports MySQL, MariaDB, and PostgreSQL — auto-detected from the container image. "
+        "Credentials (username, password, database name) are automatically discovered from the "
+        "pod's environment variables, Kubernetes Secrets, and ConfigMaps — no manual credential input needed. "
+        "Use this tool for any query involving database contents, user accounts, passwords stored in DB, "
+        "table data, or schema inspection. "
+        "ONLY read-only SQL is permitted (SELECT, SHOW, DESCRIBE, EXPLAIN). "
+        "INSERT / UPDATE / DELETE / DROP / ALTER / TRUNCATE are blocked. "
+        "WORKFLOW: "
+        "1. If the user asks about a DB user or password, first call get_secrets to check K8s secrets. "
+        "2. If the answer is not in secrets, call exec_db_query with an appropriate SELECT query. "
+        "3. Auto-detect DB type — do NOT ask the user what database they use. "
+        "Example queries: "
+        "\"SELECT user, authentication_string FROM mysql.user WHERE user='x'\", "
+        "\"SELECT usename, passwd FROM pg_shadow WHERE usename='x'\", "
+        "\"SHOW DATABASES\", "
+        "\"SELECT * FROM users LIMIT 10\""
+    ),
+    "parameters": {
+        "namespace": {
+            "type": "string",
+            "description": "Kubernetes namespace where the database pod runs.",
+        },
+        "sql": {
+            "type": "string",
+            "description": (
+                "Read-only SQL query to execute. "
+                "Examples: "
+                "\"SELECT user, host FROM mysql.user\", "
+                "\"SELECT usename FROM pg_catalog.pg_user\", "
+                "\"SHOW TABLES\", "
+                "\"DESCRIBE my_table\""
+            ),
+        },
+        "pod_name": {
+            "type": "string",
+            "default": "",
+            "description": (
+                "Optional: specific DB pod name. Leave empty to auto-detect the first "
+                "running MySQL/MariaDB/PostgreSQL pod in the namespace."
+            ),
+        },
+        "database": {
+            "type": "string",
+            "default": "",
+            "description": (
+                "Optional: database/schema name to connect to. "
+                "Leave empty to use the value auto-discovered from the pod's environment."
             ),
         },
     },

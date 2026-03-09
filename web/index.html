@@ -671,6 +671,7 @@ python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
           <tr><td><code>CHROMA_DIR</code></td><td>./chromadb</td><td>ChromaDB persistent storage path</td></tr>
           <tr><td><code>CUSTOM_RULES</code></td><td>—</td><td>Site-specific rules injected into the system prompt</td></tr>
           <tr><td><code>KUBECTL_ALLOW_WRITES</code></td><td>false</td><td>Allow write operations via kubectl_exec</td></tr>
+          <tr><td><code>ALLOW_DB_EXEC</code></td><td>true</td><td>Allow read-only SQL queries to be run inside DB pods via exec_db_query</td></tr>
           <tr><td><code>KUBECTL_MAX_CHARS</code></td><td>20000</td><td>Max chars of K8s tool output fed into LLM. Runtime-adjustable.</td></tr>
           <tr><td><code>MAX_NEW_TOKENS</code></td><td>4096</td><td>Max tokens the LLM generates per response. Runtime-adjustable.</td></tr>
           <tr><td><code>LLM_TIMEOUT</code></td><td>300</td><td>Hard timeout (seconds) per request.</td></tr>

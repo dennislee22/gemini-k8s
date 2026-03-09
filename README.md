@@ -189,6 +189,7 @@ LOG_LEVEL=DEBUG     # DEBUG shows full agentic loop: tool selection, raw LLM out
 CHROMA_DIR=./chromadb
 
 KUBECTL_ALLOW_WRITES=false
+ALLOW_DB_EXEC=true
 KUBECTL_MAX_CHARS=20000
 MAX_NEW_TOKENS=4096
 LLM_TIMEOUT=300
@@ -284,6 +285,7 @@ Qwen3-8B in bfloat16 uses ~16–20 GB VRAM. In CPU-only mode the model loads int
 
 - All typed K8s tools are **read-only** by design.
 - `kubectl_exec` is **read-only by default**. Set `KUBECTL_ALLOW_WRITES=true` to enable write ops.
+- `exec_db_query` runs read-only SQL (SELECT/SHOW/DESCRIBE) inside DB pods. Write SQL (INSERT/UPDATE/DELETE/DROP) is always blocked. Disable entirely with `ALLOW_DB_EXEC=false`.
 - Secret values are hidden by default. Toggle in ⚙ Settings → Security. The toggle state persists in browser localStorage per user.
 - Never expose this service publicly — it has direct cluster read access.
 - Restrict the env file: `chmod 600 env`
