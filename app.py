@@ -102,6 +102,13 @@ EMBED_MODEL     = os.getenv("EMBED_MODEL",         "nomic-ai/nomic-embed-text-v1
 CHROMA_DIR      = os.getenv("CHROMA_DIR",          str(_HERE / "chromadb"))
 CUSTOM_RULES    = os.getenv("CUSTOM_RULES",        "").strip()
 
+# ── Routing fallback ──────────────────────────────────────────────────────────
+# Deterministic safety net for LLMs that sometimes produce empty/malformed
+# tool-call JSON (e.g. small local models like Qwen3-8B).
+# Set to False when using a reliable LLM (GPT-4, Claude, Gemini, etc.)
+# that consistently follows the tool-calling schema — no code change needed elsewhere.
+ENABLE_FALLBACK_ROUTING: bool = True
+
 # Runtime-adjustable generation cap.  Exposed via GET/POST /api/config and
 # the Settings → Max Output tab.  Synthesis calls use this value; tool-
 # selection calls always use 256 (just a small <tool_call> JSON block).
@@ -741,10 +748,14 @@ def build_agent():
             raw = m.group(1).strip()
             try:
                 obj = json.loads(raw)
+                # arguments may be a pre-serialized JSON string (Qwen3 sometimes
+                # emits them that way) — parse it to avoid double-escaping later.
+                args_raw = obj.get("arguments", {})
+                args_parsed = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                 tcs.append({
                     "id":   f"tc_{uuid.uuid4().hex[:8]}",
                     "name": obj["name"],
-                    "args": obj.get("arguments", {}),
+                    "args": args_parsed,
                     "type": "tool_call",
                 })
             except Exception as e:
@@ -866,7 +877,7 @@ def build_agent():
         # This handles complete LLM failures (empty output, malformed JSON).
         # It does NOT fire just because Qwen3 picked fewer tools than expected —
         # that's now the LLM's prerogative in agentic mode.
-        if not tcs and not content.strip() and itr == 1:
+        if not tcs and not content.strip() and itr == 1 and ENABLE_FALLBACK_ROUTING:
             user_msg = next((m.content for m in reversed(msgs) if isinstance(m, HumanMessage)), "")
             _log_ag.warning(f"[llm_node itr={itr}] complete failure — fallback routing for: {user_msg!r}")
             import uuid
