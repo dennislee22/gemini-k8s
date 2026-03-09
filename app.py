@@ -1042,7 +1042,7 @@ async def run_agent(user_message: str) -> dict:
         "clarification_needed": False,
     }
 
-async def run_agent_streaming(user_message: str):
+async def run_agent_streaming(user_message: str, history: list = None):
     """
     Async generator that yields Server-Sent Events (SSE) strings.
 
@@ -1097,9 +1097,20 @@ async def run_agent_streaming(user_message: str):
         _hb_task = _asyncio.ensure_future(_heartbeat_task())
 
         async def _run_stream():
+            # Build message list: prior conversation turns + current message
+            from langchain_core.messages import AIMessage as _AIMessage
+            history_msgs = []
+            for turn in (history or []):
+                if turn.role == "user":
+                    history_msgs.append(HumanMessage(content=turn.content))
+                elif turn.role == "assistant":
+                    history_msgs.append(_AIMessage(content=turn.content))
+            all_messages = history_msgs + [HumanMessage(content=user_message)]
+            logger.debug(f"[REQ:{req_id}] history_turns={len(history or [])}  total_messages={len(all_messages)}")
+
             async for event in agent.astream_events(
                 {
-                    "messages":        [HumanMessage(content=user_message)],
+                    "messages":        all_messages,
                     "tool_calls_made": [],
                     "iteration":       0,
                     "status_updates":  [],
@@ -1357,7 +1368,14 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="Cloudera ECS AI Ops", lifespan=_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-class ChatRequest(BaseModel): message: str; decode_secrets: bool = False
+class HistoryMessage(BaseModel):
+    role: str   # "user" or "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    message: str
+    decode_secrets: bool = False
+    history: list[HistoryMessage] = []
 class ChatResponse(BaseModel): response: str; tools_used: list; iterations: int; status_updates: list; elapsed_seconds: float
 class IngestRequest(BaseModel): docs_dir: str; force: bool = False
 class IngestResponse(BaseModel): results: list; total_files: int; total_chunks: int
@@ -1399,11 +1417,11 @@ async def chat_stream(req: ChatRequest):
     """
     if not req.message.strip():
         raise HTTPException(400, "Empty message")
-    logger.info(f"[API] POST /chat/stream  message={req.message!r:.120}  decode_secrets={req.decode_secrets}")
+    logger.info(f"[API] POST /chat/stream  message={req.message!r:.120}  decode_secrets={req.decode_secrets}  history_turns={len(req.history)}")
     _decode_secrets_ctx.set(req.decode_secrets)
     logger.debug(f"[API] ContextVar set: decode_secrets={_decode_secrets_ctx.get()}")
     return StreamingResponse(
-        run_agent_streaming(req.message),
+        run_agent_streaming(req.message, history=req.history),
         media_type="text/event-stream",
         headers={
             "Cache-Control":   "no-cache",
