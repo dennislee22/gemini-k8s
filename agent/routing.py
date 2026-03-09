@@ -50,9 +50,6 @@ def default_tools_for(user_msg: str) -> list:
     lm = user_msg.lower()
     ns = resolve_namespace(lm)
 
-    # ── How-to / capability / self-referential queries ────────────────────────
-    # "teach me how you ...", "show me how you ...", "how do you ...", "what can you do"
-    # These must be answered conversationally — never trigger live cluster tools.
     _is_howto = (
         re.search(r'\b(teach|explain|show)\s+(me\s+)?(how\s+(you|to|do\s+you)|step\s+by\s+step)', lm)
         or re.search(r'\bhow\s+do\s+you\b', lm)
@@ -72,8 +69,6 @@ def default_tools_for(user_msg: str) -> list:
             and any(k in lm for k in ["how many", "list", "count", "stuck",
                                        "terminating", "active", "phase"])
             and "pod" not in lm
-            # Exclude queries where "namespace" is only used as a location word
-            # e.g. "list the foo-secret in cdp namespace" → not a namespace query
             and not re.search(r'\b(in|for|from|within)\s+\w+\s+namespace\b', lm))
     )
     if is_ns_query:
@@ -111,7 +106,6 @@ def default_tools_for(user_msg: str) -> list:
         "which namespace", "namespace.*most", "namespace.*least",
     ])
     if is_pod_count_query:
-        # "not running" = strict phase query — do NOT include unhealthy-but-running pods
         is_phase_only = any(k in lm for k in [
             "not running", "not run", "currently not running",
             "which pod.*not run", "pod.*not run", "pod not running",
@@ -222,8 +216,6 @@ def default_tools_for(user_msg: str) -> list:
         return [("get_cluster_role_bindings", {}), ("get_service_accounts", {"namespace": ns})]
 
     # ── Secrets ───────────────────────────────────────────────────────────────
-    # Trigger on: secret-related keywords, OR the presence of a long hyphenated
-    # k8s resource name in the query — no verb matching needed.
     _k8s_name_in_query = re.search(r'\b([a-z][a-z0-9]*(?:-[a-z0-9]+){2,})\b', lm)
     _k8s_name_candidate = _k8s_name_in_query.group(1) if _k8s_name_in_query else ""
 

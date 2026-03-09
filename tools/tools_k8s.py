@@ -100,7 +100,6 @@ def _is_high_restart(pod, restart_count: int) -> bool:
 
     now = _dt.datetime.now(_dt.timezone.utc)
 
-    # ── Step 1: find the time of the LAST restart ──────────────────────────────
     # last_state.terminated.finished_at is the most reliable indicator.
     last_restart_time = None
     for cs in (pod.status.container_statuses or []):
@@ -110,14 +109,11 @@ def _is_high_restart(pod, restart_count: int) -> bool:
                 if last_restart_time is None or t > last_restart_time:
                     last_restart_time = t
 
-    # ── Step 2: if the last restart was > 24 h ago, pod has stabilised ────────
     if last_restart_time is not None:
         hours_since_last = (now - last_restart_time).total_seconds() / 3600
         if hours_since_last > 24:
             return False   # stable — last restart was old history, not current
 
-    # ── Step 3: rate check within the current run window ──────────────────────
-    # Use container running start time (= time of last restart recovery)
     run_start = None
     for cs in (pod.status.container_statuses or []):
         if cs.state and cs.state.running and cs.state.running.started_at:
@@ -162,8 +158,6 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                 raise
 
         # ── Health-check / phase-only mode ──────────────────────────────────
-        # phase_only=True  → strict: ONLY pods whose phase != Running
-        # phase_only=False → also includes Running pods that are not fully Ready
         #                    or have high recent restarts (unhealthy-but-running)
         if not show_all and not raw_output:
             non_running_phases = []
@@ -180,7 +174,6 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                     pass
 
             if not phase_only:
-                # Also catch Running pods that are not fully Ready or crashlooping
                 _cont = None
                 while True:
                     try:
@@ -2025,8 +2018,6 @@ def kubectl_exec(command: str) -> str:
         out = out[:_KUBECTL_MAX_OUT] + f"\n...[output truncated at {_KUBECTL_MAX_OUT} chars]"
     return out
 
-# ── Namespace-level resource summary ─────────────────────────────────────────
-# Aggregates CPU and memory requests/limits across ALL pods in a namespace
 # in a single tool call — avoids calling describe_pod on every pod individually.
 
 def _parse_cpu_to_millicores(cpu_str: str) -> int:
@@ -2093,7 +2084,6 @@ def get_namespace_resource_summary(namespace: str) -> str:
         pod_mem_req_mib = 0.0
         pod_mem_lim_mib = 0.0
 
-        # Include both regular containers and init containers
         all_containers = list(pod.spec.containers or []) + list(pod.spec.init_containers or [])
         for c in all_containers:
             req = (c.resources.requests or {}) if c.resources else {}
@@ -2166,10 +2156,6 @@ def get_namespace_resource_summary(namespace: str) -> str:
     return "\n".join(lines)
 
 
-# ── DB Query via pod exec ─────────────────────────────────────────────────────
-# Read-only SQL queries executed inside database pods.
-# Supports MySQL/MariaDB and PostgreSQL auto-detection.
-# Credentials are sourced from K8s Secrets and ConfigMaps — never hardcoded.
 # INSERT / UPDATE / DELETE / DROP / TRUNCATE / ALTER / CREATE are blocked.
 
 _ALLOW_DB_EXEC = os.getenv("ALLOW_DB_EXEC", "true").lower() in ("1", "true", "yes")
@@ -2519,7 +2505,6 @@ def exec_db_query(namespace: str, sql: str,
             "Only SELECT and read-only queries are allowed."
         )
 
-    # ── Step 1: find the DB pod ───────────────────────────────────────────────
     if pod_name:
         # Strip namespace/ prefix if LLM passes it
         if "/" in pod_name:
@@ -2543,15 +2528,12 @@ def exec_db_query(namespace: str, sql: str,
 
     _log.info(f"[exec_db_query] pod={namespace}/{pod_name}  db_type={db_type}")
 
-    # ── Step 2: find the correct container inside the pod ────────────────────
     if container:
         container_name = container  # explicit override
     else:
         container_name = _find_db_container(pod_name, namespace, db_type)
     _log.info(f"[exec_db_query] container={container_name!r}")
 
-    # ── Step 3: gather credentials ────────────────────────────────────────────
-    # ── Step 3: gather credentials ────────────────────────────────────────────
     creds = _find_db_credentials(namespace, pod_name)
     # Explicit caller override wins; then env-var discovery; then live DB query fallback
     db_name = database or creds.get("database") or ""
@@ -2559,7 +2541,6 @@ def exec_db_query(namespace: str, sql: str,
     _log.debug(f"[exec_db_query] creds found: user={creds['user']}  "
                f"db={db_name!r}  host={creds['host']}")
 
-    # ── Step 4: build the exec command ───────────────────────────────────────────
     from kubernetes.stream import stream as _k8s_stream
 
     safe_sql = sql.replace("'", "'\\''")
@@ -2644,7 +2625,6 @@ def exec_db_query(namespace: str, sql: str,
     else:
         return f"[ERROR] Unsupported DB type: {db_type}"
 
-    # ── Step 5: execute via K8s stream API ───────────────────────────────────
     stream_kwargs = dict(
         stderr=True,
         stdin=False,

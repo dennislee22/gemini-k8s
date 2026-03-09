@@ -102,11 +102,7 @@ EMBED_MODEL     = os.getenv("EMBED_MODEL",         "nomic-ai/nomic-embed-text-v1
 CHROMA_DIR      = os.getenv("CHROMA_DIR",          str(_HERE / "chromadb"))
 CUSTOM_RULES    = os.getenv("CUSTOM_RULES",        "").strip()
 
-# ── Routing fallback ──────────────────────────────────────────────────────────
-# Deterministic safety net for LLMs that sometimes produce empty/malformed
 # tool-call JSON (e.g. small local models like Qwen3-8B).
-# Set to False when using a reliable LLM (GPT-4, Claude, Gemini, etc.)
-# that consistently follows the tool-calling schema — no code change needed elsewhere.
 ENABLE_FALLBACK_ROUTING: bool = True
 
 # Runtime-adjustable generation cap.  Exposed via GET/POST /api/config and
