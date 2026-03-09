@@ -736,15 +736,42 @@ def get_service_status(namespace: str = "all") -> str:
 
 
 
-def get_ingress_status(namespace: str = "all", name: str = "") -> str:
+
+def get_ingress_status(namespace: str = "all", name: str = "",
+                       port: int = 0) -> str:
     """
-    List ingresses in a namespace, or find an ingress by hostname (FQDN) or exact name.
+    List ingresses, find by hostname (FQDN), exact name, or filter by port (e.g. 443).
     When name contains dots it is treated as a hostname and ALL namespaces are searched.
-    When namespace is "all" and name is an exact ingress name, all namespaces are searched.
+    When port is set (e.g. 443), only ingresses that expose that port are returned.
     """
+    def _get_ports(ing) -> list:
+        """Extract all ports exposed by an ingress (from TLS and service backends)."""
+        ports = set()
+        # TLS presence implies 443
+        if ing.spec.tls:
+            ports.add(443)
+        # Annotations may declare ssl-redirect or force-ssl
+        ann = ing.metadata.annotations or {}
+        for v in ann.values():
+            if "443" in str(v):
+                ports.add(443)
+        # Backend service ports
+        for rule in (ing.spec.rules or []):
+            if rule.http:
+                for path in (rule.http.paths or []):
+                    svc = path.backend.service
+                    p = svc.port.number if svc.port.number else None
+                    if p:
+                        ports.add(p)
+        # If no explicit service port found, assume 80
+        if not ports:
+            ports.add(80)
+        return sorted(ports)
+
     def _fmt(ing) -> str:
         cls   = ing.spec.ingress_class_name or "default"
         hosts = [rule.host or "*" for rule in (ing.spec.rules or [])]
+        ports = _get_ports(ing)
         lb    = [
             addr.ip or addr.hostname
             for status in (ing.status.load_balancer.ingress or [])
@@ -755,6 +782,7 @@ def get_ingress_status(namespace: str = "all", name: str = "") -> str:
             f"Ingress: {ing.metadata.namespace}/{ing.metadata.name}",
             f"  Class:     {cls}",
             f"  Hosts:     {', '.join(hosts) or 'none'}",
+            f"  Ports:     {', '.join(str(p) for p in ports)}",
             f"  LB IP:     {', '.join(lb) or 'pending'}",
         ]
         if ann:
@@ -778,14 +806,29 @@ def get_ingress_status(namespace: str = "all", name: str = "") -> str:
         return "\n".join(out)
 
     try:
-        if name:
-            all_ings = _net.list_ingress_for_all_namespaces()
+        all_ings = _net.list_ingress_for_all_namespaces()
+        pool = all_ings.items
 
+        # ── Port filter ───────────────────────────────────────────────────────
+        if port:
+            pool = [ing for ing in pool if port in _get_ports(ing)]
+            if not pool:
+                return f"No ingresses found exposing port {port} in any namespace."
+            out = [f"Ingresses exposing port {port}:"]
+            for ing in pool:
+                hosts = [rule.host or "*" for rule in (ing.spec.rules or [])]
+                ports = _get_ports(ing)
+                out.append(
+                    f"  {ing.metadata.namespace}/{ing.metadata.name}: "
+                    f"hosts:{hosts} ports:{ports}")
+            return "\n".join(out)
+
+        if name:
             # ── Hostname search (name contains dots → treat as FQDN) ──────────
             if "." in name:
                 host_lower = name.lower()
                 matches = []
-                for ing in all_ings.items:
+                for ing in pool:
                     for rule in (ing.spec.rules or []):
                         if rule.host and rule.host.lower() == host_lower:
                             matches.append(ing)
@@ -807,21 +850,20 @@ def get_ingress_status(namespace: str = "all", name: str = "") -> str:
                         return f"Ingress '{name}' not found in namespace '{namespace}'."
                     raise
             else:
-                matches = [i for i in all_ings.items if i.metadata.name == name]
+                matches = [i for i in pool if i.metadata.name == name]
                 if not matches:
                     return f"Ingress '{name}' not found in any namespace."
                 return "\n\n".join(_fmt(ing) for ing in matches)
 
-        # ── List ingresses ────────────────────────────────────────────────────
-        ings = (_net.list_ingress_for_all_namespaces()
-                if namespace == "all"
-                else _net.list_namespaced_ingress(namespace=namespace))
-        if not ings.items:
+        # ── List ingresses (namespace filter) ─────────────────────────────────
+        if namespace != "all":
+            pool = [i for i in pool if i.metadata.namespace == namespace]
+        if not pool:
             return f"No Ingresses in '{namespace}'."
         out = [f"Ingresses in '{namespace}':"]
-        for ing in ings.items:
-            cls   = ing.spec.ingress_class_name or "default"
+        for ing in pool:
             hosts = [rule.host or "*" for rule in (ing.spec.rules or [])]
+            ports = _get_ports(ing)
             lb    = [
                 addr.ip or addr.hostname
                 for status in (ing.status.load_balancer.ingress or [])
@@ -829,7 +871,7 @@ def get_ingress_status(namespace: str = "all", name: str = "") -> str:
             ] if ing.status.load_balancer else []
             out.append(
                 f"  {ing.metadata.namespace}/{ing.metadata.name}: "
-                f"class:{cls} hosts:{hosts} lb:{lb or 'pending'}")
+                f"hosts:{hosts} ports:{ports} lb:{lb or 'pending'}")
         return "\n".join(out)
     except ApiException as e:
         return f"K8s API error: {e.reason}"
@@ -2673,15 +2715,14 @@ K8S_TOOLS: dict = {
     "get_ingress_status": {
         "fn":          get_ingress_status,
         "description": (
-            "List Ingress rules, hostnames, and load balancer IPs/addresses. "
-            "Can also find which ingress and namespace serve a specific hostname (FQDN). "
-            "ALWAYS search ALL namespaces when the user does not specify one. "
-            "When the user provides a hostname (e.g. 'console-cdp.apps.dlee155.cldr.example'), "
-            "pass it as name= — the tool searches all namespaces automatically. "
-            "Examples: "
-            "get_ingress_status(name='console-cdp.apps.dlee155.cldr.example') — finds ingress by hostname "
-            "get_ingress_status(namespace='cdp') — lists all ingresses in a namespace "
-            "get_ingress_status(namespace='all') — lists all ingresses cluster-wide"
+            "List Ingress rules, hostnames, ports, and load balancer IPs/addresses. "
+            "Can find which ingress and namespace serve a specific hostname (FQDN) or port. "
+            "ALWAYS search ALL namespaces by default. "
+            "Use cases: "
+            "'which namespace has ingress port 443' → get_ingress_status(port=443) "
+            "'which namespace serves hostname X' → get_ingress_status(name='X.example.com') "
+            "'list all ingresses in cdp namespace' → get_ingress_status(namespace='cdp') "
+            "'list all cluster ingresses' → get_ingress_status(namespace='all')"
         ),
         "parameters":  {
             "namespace": {"type": "string", "default": "all",
@@ -2691,6 +2732,12 @@ K8S_TOOLS: dict = {
                               "Ingress name OR hostname/FQDN. "
                               "If it contains dots it is treated as a hostname and ALL namespaces are searched. "
                               "Example: 'console-cdp.apps.dlee155.cldr.example'"
+                          )},
+            "port":      {"type": "integer", "default": 0,
+                          "description": (
+                              "Filter ingresses by port number. "
+                              "Use port=443 to find all ingresses exposing HTTPS/TLS. "
+                              "Use port=80 to find HTTP-only ingresses."
                           )},
         },
     },
