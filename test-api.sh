@@ -2,7 +2,7 @@
 
 DEFAULT_HOST="cpu-ecs-ai-ops-cpu.ml-9df5bc51-1da.apps.cdppvc.ares.olympus.cloudera.com"
 HOST="${1:-$DEFAULT_HOST}"
-URL="https://${HOST}/api/ask"
+URL="https://${HOST}/chat/stream"
 
 QUESTIONS=(
     "list all pods"
@@ -43,37 +43,44 @@ for i in "${!QUESTIONS[@]}"; do
     printf "       Sending… [%s]\n" "$(date '+%H:%M:%S')"
     START=$(date +%s)
 
-    RESPONSE=$(curl -s \
-        --max-time 1200 \
+    BODY=$(printf '%s' "$Q" | python3 -c '
+import sys, json
+q = sys.stdin.read()
+print(json.dumps({"message": q, "history": [], "decode_secrets": False}))
+')
+
+    ANSWER=$(curl -s --max-time 1200 --no-buffer \
         -X POST "$URL" \
         -H "Content-Type: application/json" \
-        -d "{\"q\": $(printf '%s' "$Q" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'), \"history\": [], \"decode_secrets\": false}")
+        -H "Accept: text/event-stream" \
+        -d "$BODY" | python3 -c '
+import sys, json
+answer = None
+for raw_line in sys.stdin:
+    line = raw_line.strip()
+    if not line.startswith("data:"):
+        continue
+    try:
+        payload = json.loads(line[5:].strip())
+    except Exception:
+        continue
+    if payload.get("type") == "result":
+        answer = payload.get("response", "")
+        break
+if answer is not None:
+    print(answer)
+else:
+    print("NO_RESULT")
+    sys.exit(1)
+')
 
     STATUS=$?
     END=$(date +%s)
     ELAPSED=$((END - START))
     printf "       Answered  [%s] — %ds elapsed\n" "$(date '+%H:%M:%S')" "$ELAPSED"
 
-    if [ $STATUS -ne 0 ]; then
-        printf "FAILED (curl exit %d, %ds)\n" "$STATUS" "$ELAPSED"
-        FAIL=$((FAIL + 1))
-        continue
-    fi
-
-    ANSWER=$(echo "$RESPONSE" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    r = d.get('response') or d.get('answer') or d.get('text') or str(d)
-    print(r)
-except Exception as e:
-    print('Parse error:', e)
-    sys.exit(1)
-" 2>&1)
-
-    if [ $? -ne 0 ]; then
-        printf "PARSE ERROR (%ds)\n" "$ELAPSED"
-        echo "       Raw: ${RESPONSE:0:200}"
+    if [ $STATUS -ne 0 ] || [ "$ANSWER" = "NO_RESULT" ]; then
+        printf "FAILED (%ds)\n" "$ELAPSED"
         FAIL=$((FAIL + 1))
     else
         printf "OK (%ds)\n" "$ELAPSED"
