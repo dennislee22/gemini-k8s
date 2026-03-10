@@ -22,6 +22,10 @@ This ECS AI Ops Chatbot is powered by:
 
 ---
 
+> ⚠️ **Note:** While the tooling is built on the Kubernetes Python SDK, the system prompt, tool selection logic, and multi-hop reasoning chains are highly curated for ECS and may not work correctly on other Kubernetes distributions with different storage or networking subsystems.
+
+---
+
 ## Table of Contents
 
 - [Demo](#demo)
@@ -318,7 +322,3 @@ Qwen3-8B in bfloat16 uses ~16–20 GB VRAM. In CPU-only mode the model loads int
 - Secret values are hidden by default. Toggle in ⚙ Settings → Security. The toggle state persists in browser localStorage per user.
 - Never expose this service publicly — it has direct cluster read access.
 - Restrict the env file: `chmod 600 env`
-
----
-
-> ⚠️ **Note:** While the tooling is built on the Kubernetes Python SDK, the system prompt, tool selection logic, and multi-hop reasoning chains are highly curated for ECS and may not work correctly on other Kubernetes distributions with different storage or networking subsystems.
