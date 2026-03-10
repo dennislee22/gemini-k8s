@@ -1469,23 +1469,35 @@ async def chat_stream(req: ChatRequest):
 
     async def _keepalive_stream():
         """
-        Wraps run_agent_streaming with a keep-alive loop.
-        While the agent is blocking on CPU inference, no SSE bytes are sent
-        and the browser/proxy kills the connection after ~2 minutes.
-        This wrapper uses asyncio.wait_for to poll the inner generator every
-        10 seconds — if no event arrives in that window, it emits an SSE
-        comment line (': keep-alive') which browsers ignore but which resets
-        the TCP idle timer.
+        Pumps run_agent_streaming through a queue so keep-alive SSE comment
+        bytes can be sent every 10s during long CPU inference gaps.
+        The agent generator runs in a background task; the main loop polls the
+        queue with a timeout and emits ': keep-alive' when nothing arrives,
+        resetting the browser/proxy TCP idle timer without touching the agent.
         """
-        gen = run_agent_streaming(req.message, history=req.history)
-        while True:
+        queue: _asyncio.Queue = _asyncio.Queue()
+        _SENTINEL = object()
+
+        async def _producer():
             try:
-                chunk = await _asyncio.wait_for(gen.__anext__(), timeout=10)
-                yield chunk
-            except _asyncio.TimeoutError:
-                yield ": keep-alive\n\n"
-            except StopAsyncIteration:
-                break
+                async for chunk in run_agent_streaming(req.message, history=req.history):
+                    await queue.put(chunk)
+            finally:
+                await queue.put(_SENTINEL)
+
+        task = _asyncio.ensure_future(_producer())
+        try:
+            while True:
+                try:
+                    item = await _asyncio.wait_for(queue.get(), timeout=10)
+                except _asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                if item is _SENTINEL:
+                    break
+                yield item
+        finally:
+            task.cancel()
 
     return StreamingResponse(
         _keepalive_stream(),
