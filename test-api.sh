@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+# Sequential API test — each query waits for the previous response before proceeding.
 
-URL="https://ecs-ai-ops.ml-9df5bc51-1da.apps.cdppvc.ares.olympus.cloudera.com/api/ask"
+URL="https://cpu-ecs-ai-ops-cpu.ml-9df5bc51-1da.apps.cdppvc.ares.olympus.cloudera.com/api/ask"
 
 QUESTIONS=(
     "list all pods"
@@ -47,7 +48,7 @@ for i in "${!QUESTIONS[@]}"; do
         --max-time 1200 \
         -X POST "$URL" \
         -H "Content-Type: application/json" \
-        -d "{\"message\": $(printf '%s' "$Q" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'), \"history\": [], \"decode_secrets\": false}")
+        -d "{\"q\": $(printf '%s' "$Q" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'), \"history\": [], \"decode_secrets\": false}")
 
     STATUS=$?
     END=$(date +%s)
