@@ -161,11 +161,6 @@ The application automatically detects available GPUs at startup and uses them if
 pip install -r requirements.txt
 ```
 
-Key additions vs the previous ChromaDB version:
-- `lancedb` — replaces chromadb; embedded, no server required
-- `tantivy` — native FTS index for LanceDB keyword search
-- `pandas` + `openpyxl` — Excel ingestion (`ingest_excel()`)
-
 For NVIDIA GPU:
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu121
