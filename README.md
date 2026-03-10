@@ -1,12 +1,30 @@
 <h1><img src="web/static/chatbot-icon.svg" width="30" height="30"> <img src="web/static/k8s-logo.svg" width="30" height="30"> Cloudera ECS AI Ops Chatbot</h1>
 
-An air-gapped Kubernetes operations chatbot for Cloudera ECS, powered by a local LLM (Qwen3-8B), LangGraph agentic loop, and ChromaDB RAG.
+An Agentic AI system for checking a live **Cloudera ECS (Embedded Container Service)** cluster:
+
+- **No Kubernetes expertise required** — operators can ask questions in plain English without knowing `kubectl` commands
+- **Instant cluster visibility** — understand the current state of pods, nodes, namespaces, storage, ingress, and deployments through natural language queries
+- **Root cause assistance** — the agent automatically chains tool calls (pod status → describe pod → resource quotas → events) to help diagnose crashes, and pending pods
+- **Secret and credential lookup** — retrieve Kubernetes secrets and database credentials without manually decoding base64 or writing kubectl commands
+- **Database inspection** — run read-only SQL queries inside DB pods (MySQL, PostgreSQL) directly from the chat interface
+- **Documentation-aware answers** — RAG search surfaces relevant runbook entries and known issues alongside live cluster data
+- **Air-gapped friendly** — fully self-contained, no cloud LLM APIs, suitable for secured and isolated environments
+
+> ⚠️ **Note:** While the tooling is built on the Kubernetes Python SDK, the system prompt, tool selection logic, and multi-hop reasoning chains are highly curated for ECS and may not work correctly on other Kubernetes distributions with different storage or networking subsystems.
+
+Powered by:
+
+- 🤖 **Self-hosted local LLM** — Qwen3-8B running entirely on-premise via HuggingFace Transformers, with no external API calls or internet dependency. Qwen3-8B is chosen because it strikes the right balance; lightweight enough to run on modest hardware, yet capable enough to avoid the hallucination issues common in smaller models. It also has strong native tool-calling capability, which is essential for reliably driving the agentic loop.
+- 🔁 **LangGraph agentic loop** — a ReAct agent that autonomously selects the right Kubernetes tools, executes them, observes the results, and chains further calls when needed before synthesising a final answer
+- 📚 **ChromaDB RAG** — cross-references live cluster data against your own runbooks, known-issue docs, and SOPs ingested locally into a ChromaDB vector store
+
+<img src="web/static/ecs-ai-arch.gif" width="600" />
 
 ---
 
 ## Table of Contents
 
-- [Architecture](#architecture)
+- [Demo](#demo)
 - [Project Structure](#project-structure)
 - [Stack](#stack)
 - [K8s Tools](#k8s-tools)
@@ -20,9 +38,11 @@ An air-gapped Kubernetes operations chatbot for Cloudera ECS, powered by a local
 
 ---
 
-## Architecture
+## Demo
 
-<img src="web/static/ecs-ai-arch.gif" width="600" />
+| CPU | GPU |
+|---|---|
+| <img src="demo/demo_cpu.gif" width="380" /> | <img src="demo/demo_gpu.gif" width="380" /> |
 
 ---
 
@@ -50,6 +70,10 @@ An air-gapped Kubernetes operations chatbot for Cloudera ECS, powered by a local
 │       └── ecs-ai-arch.gif
 │
 ├── docs/                     # Ingested into ChromaDB for RAG
+
+├── api_test_logs/
+│   ├── test-API-CPU-output.log
+│   └── test-API-GPU-A100-80GB-output.log
 ├── requirements.txt
 ├── chromadb/                 # Auto-created on first ingest
 └── logs/
@@ -107,15 +131,23 @@ An air-gapped Kubernetes operations chatbot for Cloudera ECS, powered by a local
 ### Prerequisites
 
 - **Python 3.12** is required.
-- Download the LLM and embedding models before starting (air-gapped environment):
+- In an air-gapped environment, all Python libraries listed in `requirements.txt` must be pre-downloaded and hosted on an internal PyPI mirror or installed from local wheel files. Use `pip install --no-index --find-links /path/to/wheels -r requirements.txt` if no mirror is available.
+- Download the LLM and embedding models before starting:
 
 ```bash
-# Qwen3-8B
+# Qwen3-8B LLM
 git clone https://huggingface.co/Qwen/Qwen3-8B /models/Qwen3-8B
 
 # SentenceTransformers embedding model
 git clone https://huggingface.co/nomic-ai/nomic-embed-text-v1.5 /models/nomic-embed-text-v1.5
 ```
+
+**GPU vs CPU:**
+
+The application automatically detects available GPUs at startup and uses them if present. If no GPU is found, it falls back to CPU inference without any manual configuration.
+
+- **GPU (recommended)** — responses typically complete in **10–30 seconds**. Requires an NVIDIA GPU with at least 20 GB VRAM (e.g. A100, A30, RTX 3090/4090).
+- **CPU only** — the model loads into system RAM and inference takes **several minutes per query**. Usable for testing or low-frequency queries, but not practical for interactive use.
 
 ### 1. Install dependencies
 
@@ -159,9 +191,11 @@ python3 app.py --ingest ./docs --force   # re-ingest all
 ### 4. Start the server
 
 ```bash
-python3 app.py                                          # http://0.0.0.0:9000
-python3 app.py --port 9000 --host 0.0.0.0
-python3 app.py --model-dir /models/Qwen3-8B             # local model path
+# Usage:
+python3 app.py --port 9000                                  # custom port
+python3 app.py --host 0.0.0.0                               # bind address
+python3 app.py --model-dir  Qwen/Qwen3-8B                   # LLM from local dir or HF hub
+python3 app.py --embed-dir  nomic-ai/nomic-embed-text-v1.5  # embeddings from local dir or HF hub
 ```
 
 Open `http://localhost:9000` in your browser.
@@ -236,6 +270,13 @@ curl -s http://localhost:9000/api/system
 ```
 
 > ⚠️ `/api/ask` is a blocking request. For long-running CPU queries, use `/chat/stream` instead to avoid nginx proxy read timeout.
+
+### Sample API Output
+
+| Inference | Log |
+|---|---|
+| CPU only | [test-API-CPU-output.log](api_test_logs/test-API-CPU-output.log) |
+| GPU (A100 80GB) | [test-API-GPU-A100-80GB-output.log](api_test_logs/test-API-GPU-A100-80GB-output.log) |
 
 ---
 
