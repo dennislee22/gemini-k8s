@@ -758,7 +758,7 @@ def build_agent():
                 _log_ag.warning(f"[parse_tool_calls] failed to parse: {raw!r} — {e}")
         return tcs
 
-    async def llm_node(state: AgentState):
+    def llm_node(state: AgentState):
         """
         Invoke Qwen3 natively via tokenizer.apply_chat_template().
 
@@ -835,23 +835,17 @@ def build_agent():
             _max_new = max(512, min(_MAX_NEW_TOKENS, 1024) if NUM_GPU == 0 else _MAX_NEW_TOKENS)
         _log_ag.debug(f"[llm_node itr={itr}] max_new_tokens={_max_new}")
 
-        import asyncio as _asyncio
-        _loop = _asyncio.get_event_loop()
-
-        def _generate():
-            with torch.no_grad():
-                return model.generate(
-                    input_ids,
-                    max_new_tokens=_max_new,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.8,
-                    top_k=20,
-                    repetition_penalty=1.05,
-                    pad_token_id=tokenizer.eos_token_id,
-                )
-
-        output_ids = await _loop.run_in_executor(None, _generate)
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids,
+                max_new_tokens=_max_new,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                repetition_penalty=1.05,
+                pad_token_id=tokenizer.eos_token_id,
+            )
 
         new_tokens = output_ids[0][input_len:]
         raw_text   = tokenizer.decode(new_tokens, skip_special_tokens=True)
@@ -896,9 +890,7 @@ def build_agent():
                     "Be specific: name the exact tool you call, the parameters you pass, "
                     "and what the output looks like. Do NOT call any tool — just explain."
                 ))]
-                conv_resp = await _asyncio.get_event_loop().run_in_executor(
-                    None, lambda: llm_pipeline.invoke(conv_msgs)
-                )
+                conv_resp = llm_pipeline.invoke(conv_msgs)
                 conv_content = (conv_resp.content if hasattr(conv_resp, "content")
                                 else str(conv_resp)).strip()
                 if conv_content:
@@ -1472,8 +1464,31 @@ async def chat_stream(req: ChatRequest):
     logger.info(f"[API] POST /chat/stream  message={req.message!r:.120}  decode_secrets={req.decode_secrets}  history_turns={len(req.history)}")
     _decode_secrets_ctx.set(req.decode_secrets)
     logger.debug(f"[API] ContextVar set: decode_secrets={_decode_secrets_ctx.get()}")
+
+    import asyncio as _asyncio
+
+    async def _keepalive_stream():
+        """
+        Wraps run_agent_streaming with a keep-alive loop.
+        While the agent is blocking on CPU inference, no SSE bytes are sent
+        and the browser/proxy kills the connection after ~2 minutes.
+        This wrapper uses asyncio.wait_for to poll the inner generator every
+        10 seconds — if no event arrives in that window, it emits an SSE
+        comment line (': keep-alive') which browsers ignore but which resets
+        the TCP idle timer.
+        """
+        gen = run_agent_streaming(req.message, history=req.history)
+        while True:
+            try:
+                chunk = await _asyncio.wait_for(gen.__anext__(), timeout=10)
+                yield chunk
+            except _asyncio.TimeoutError:
+                yield ": keep-alive\n\n"
+            except StopAsyncIteration:
+                break
+
     return StreamingResponse(
-        run_agent_streaming(req.message, history=req.history),
+        _keepalive_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control":   "no-cache",
