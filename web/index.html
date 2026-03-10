@@ -817,17 +817,6 @@ python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
         <div class="gl-ex-row"><div class="gl-ex-bar gl-bar-general"></div><div class="gl-ex-body"><span class="gl-ex-text">how are you?</span><button class="gl-copy-btn" onclick="glCopy(this,'how are you?')">copy</button></div></div>
         <div class="gl-ex-note">Answered warmly as the ECS Operations Assistant. No tool is called.</div>
 
-        <h2>PHRASING TIPS</h2>
-        <table>
-          <tr><th>Instead of</th><th>Try</th><th>Why</th></tr>
-          <tr><td><code>show me pods</code></td><td><code>list all pods in cdp namespace</code></td><td>Namespace scoping is faster and avoids cluster-wide scans</td></tr>
-          <tr><td><code>check the db</code></td><td><code>get tables in db-0 of cmlwb1 namespace</code></td><td>Pod name + namespace gives the tool a direct target</td></tr>
-          <tr><td><code>any issues?</code></td><td><code>are there any pods not running in cdp?</code></td><td>Explicit phase query returns only non-Running pods</td></tr>
-          <tr><td><code>show me the cert</code></td><td><code>show me cdp-private-installer-db-root-cert in cdp namespace</code></td><td>Full secret name is matched directly without guessing</td></tr>
-          <tr><td><code>show me how you list pods in cdp</code></td><td><code>show me how you list pods in cdp? Don't run it, just explain.</code></td><td>Without the instruction, a namespace in the query triggers a live cluster call</td></tr>
-          <tr><td><code>what's the password?</code></td><td><code>what's the password?</code> + enable Show Secret Values</td><td>Secret values are masked by default &mdash; enable in &#9881; Settings &rarr; Security</td></tr>
-        </table>
-
       </div><!-- #guidelines-pane -->
 
     </div><!-- #chat-col -->
