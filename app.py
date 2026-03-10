@@ -112,7 +112,7 @@ _MAX_NEW_TOKENS: int = int(os.getenv("MAX_NEW_TOKENS", "4096"))
 
 # Runtime-adjustable request timeout (seconds).  Exposed via GET/POST /api/config
 # and the Settings → LLM Input/Output tab.
-_LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "300"))
+_LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "0")) or (900 if NUM_GPU == 0 else 300)
 
 # Request-scoped flag — True when the user has 'Show Secret Values' enabled in Settings.
 # Set per-request in chat_stream; read by agent/routing.py via get_decode_secrets().
@@ -758,7 +758,7 @@ def build_agent():
                 _log_ag.warning(f"[parse_tool_calls] failed to parse: {raw!r} — {e}")
         return tcs
 
-    def llm_node(state: AgentState):
+    async def llm_node(state: AgentState):
         """
         Invoke Qwen3 natively via tokenizer.apply_chat_template().
 
@@ -832,20 +832,26 @@ def build_agent():
         if not has_tool_results:
             _max_new = 512   # tool selection — raised from 256 for multi-tool calls
         else:
-            _max_new = max(512, _MAX_NEW_TOKENS)
+            _max_new = max(512, min(_MAX_NEW_TOKENS, 1024) if NUM_GPU == 0 else _MAX_NEW_TOKENS)
         _log_ag.debug(f"[llm_node itr={itr}] max_new_tokens={_max_new}")
 
-        with torch.no_grad():
-            output_ids = model.generate(
-                input_ids,
-                max_new_tokens=_max_new,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.8,
-                top_k=20,
-                repetition_penalty=1.05,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+        import asyncio as _asyncio
+        _loop = _asyncio.get_event_loop()
+
+        def _generate():
+            with torch.no_grad():
+                return model.generate(
+                    input_ids,
+                    max_new_tokens=_max_new,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.8,
+                    top_k=20,
+                    repetition_penalty=1.05,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+
+        output_ids = await _loop.run_in_executor(None, _generate)
 
         new_tokens = output_ids[0][input_len:]
         raw_text   = tokenizer.decode(new_tokens, skip_special_tokens=True)
@@ -890,7 +896,9 @@ def build_agent():
                     "Be specific: name the exact tool you call, the parameters you pass, "
                     "and what the output looks like. Do NOT call any tool — just explain."
                 ))]
-                conv_resp = llm_pipeline.invoke(conv_msgs)
+                conv_resp = await _asyncio.get_event_loop().run_in_executor(
+                    None, lambda: llm_pipeline.invoke(conv_msgs)
+                )
                 conv_content = (conv_resp.content if hasattr(conv_resp, "content")
                                 else str(conv_resp)).strip()
                 if conv_content:
@@ -1113,7 +1121,7 @@ async def run_agent_streaming(user_message: str, history: list = None):
     final_answer: str      = ""
     iteration_count: int   = 0
 
-    # Hard timeout — uses the runtime-adjustable _LLM_TIMEOUT (default 300s).
+    # Hard timeout — uses the runtime-adjustable _LLM_TIMEOUT (default 900s CPU, 300s GPU).
     # Adjustable via GET/POST /api/config or Settings → LLM Input/Output.
     _STREAM_TIMEOUT = _LLM_TIMEOUT
 
