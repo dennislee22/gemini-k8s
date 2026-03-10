@@ -26,7 +26,7 @@ PASS=0
 FAIL=0
 LOGFILE="test_api.log"
 
-exec > >(tee -a "$LOGFILE") 2>&1
+exec > >(tee "$LOGFILE") 2>&1
 
 sep() { printf '%0.s─' {1..72}; echo; }
 
