@@ -560,7 +560,12 @@ button{cursor:pointer;font-family:inherit}
         <button class="tdot active" data-theme="midnight"
           style="background:linear-gradient(135deg,#38bdf8,#818cf8)" title="Midnight"></button>
         <button class="tdot" data-theme="singapore"
-          style="background:linear-gradient(135deg,#EF3340,#b31a27)" title="Singapore"></button>
+          style="background:transparent;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:50%" title="S'pore">
+          <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0;border-radius:50%">
+            <path d="M10 0 A10 10 0 0 1 10 20 Z" fill="#ffffff"/>
+            <path d="M10 20 A10 10 0 0 1 10 0 Z" fill="#EF3340"/>
+          </svg>
+        </button>
         <button class="tdot" data-theme="cloudera"
           style="background:transparent;display:flex;align-items:center;justify-content:center;overflow:hidden" title="Cloudera">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="#F96702" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">
@@ -614,23 +619,11 @@ button{cursor:pointer;font-family:inherit}
 
         <div class="tip">&#128161; <strong>Quick start:</strong> Type a question in the <strong>ECS AI Ops</strong> tab — e.g. <em>"is my cluster having any issues?"</em> — and press <strong>Enter</strong>.</div>
 
-        <div class="tip" style="border-left-color:var(--accent2)">&#128214; <strong>Prerequisites:</strong> Python 3.12 is required.</div>
-
-        <div class="warn">&#9888; This chatbot has been tested with Qwen3-8B, which performs excellently with tool-calling. Using other self-hosted models may produce different or unexpected responses.</div>
+        <div class="warn">&#9888; This chatbot has been tested with Qwen3-8B, which performs excellently with tool-calling and is <strong>read-only by default</strong> — it will never restart, delete, or modify cluster resources. Using other self-hosted models may produce different or unexpected responses.</div>
 
         <!-- ── How it works ───────────────────────────────────────────── -->
         <h2>How it works</h2>
         <p>Each query runs through an <strong>agentic ReAct loop</strong> driven by the LLM — not by hardcoded rules. The LLM reads a Tool Selection Guide in its system prompt, picks the right tools, observes the results, and decides whether to call more tools or synthesise a final answer.</p>
-
-        <div class="warn">&#9888; The assistant is <strong>read-only by default</strong>. It will never restart, delete, or modify cluster resources.</div>
-
-        <h3>Example queries</h3>
-        <ul>
-          <li>Which node has GPUs available and in use?</li>
-          <li>Which secret in cdp has user credentials?</li>
-          <li>List all PVCs not bound across all namespaces</li>
-          <li>Show warning events in cdp namespace</li>
-        </ul>
 
         <!-- ── Configuring the Cluster ─────────────────────────────────── -->
         <h2>Configuring the Cluster</h2>
@@ -639,6 +632,16 @@ button{cursor:pointer;font-family:inherit}
         <pre><code>curl -s -X POST http://localhost:9000/api/kubeconfig \
      -H 'Content-Type: application/json' \
      -d "{\"kubeconfig\": \"$(cat ~/.kube/config | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')\"}"</code></pre>
+
+        <p>Adjust LLM input/output limits at runtime via &#9881; Settings &rarr; LLM Input/Output, or via API:</p>
+        <table>
+          <tr><th>Setting</th><th>Controls</th><th>Default</th></tr>
+          <tr><td><code>KUBECTL_MAX_CHARS</code></td><td>Characters of cluster data the LLM <strong>reads</strong></td><td>20000</td></tr>
+          <tr><td><code>MAX_NEW_TOKENS</code></td><td>Tokens the LLM <strong>writes</strong> (~4 chars/token)</td><td>4096</td></tr>
+        </table>
+        <pre><code>curl -s -X POST http://localhost:9000/api/config \
+     -H 'Content-Type: application/json' \
+     -d '{"kubectl_max_chars": 50000, "max_new_tokens": 6144}'</code></pre>
 
         <!-- ── Injecting Documents ─────────────────────────────────────── -->
         <h2>Knowledge Base (RAG)</h2>
@@ -688,18 +691,6 @@ python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
           <tr><td><span class="badge badge-get">GET</span></td><td><code>/api/prompt</code></td><td>Read current system prompt</td></tr>
           <tr><td><span class="badge badge-put">PUT</span></td><td><code>/api/prompt</code></td><td>Update system prompt</td></tr>
         </table>
-
-        <!-- ── Runtime Tuning ─────────────────────────────────────────── -->
-        <h2>Tuning Output Length</h2>
-        <table>
-          <tr><th>Setting</th><th>Controls</th><th>Default</th></tr>
-          <tr><td><code>KUBECTL_MAX_CHARS</code></td><td>Characters of cluster data the LLM <strong>reads</strong></td><td>20000</td></tr>
-          <tr><td><code>MAX_NEW_TOKENS</code></td><td>Tokens the LLM <strong>writes</strong> (~4 chars/token)</td><td>4096</td></tr>
-        </table>
-        <p>Adjust at runtime via ⚙ Settings → LLM Input/Output, or via API:</p>
-        <pre><code>curl -s -X POST http://localhost:9000/api/config \
-     -H 'Content-Type: application/json' \
-     -d '{"kubectl_max_chars": 50000, "max_new_tokens": 6144}'</code></pre>
 
         <!-- ── Configuration ──────────────────────────────────────────── -->
         <h2>Environment Variables</h2>
@@ -1132,7 +1123,7 @@ const THEMES = {
   },
   singapore:{
     // #EF3340 accent on white background
-    name:'Singapore', shimmer:false, solidTitle:'#EF3340',
+    name:"S'pore", shimmer:false, solidTitle:'#EF3340',
     '--bg':'#ffffff','--headerBg':'#ffffff','--border':'#fbd0d3',
     '--accent':'#EF3340','--accent2':'#b31a27',
     '--msgBg':'#fff5f5','--inputBg':'#ffffff',
@@ -2018,7 +2009,7 @@ setInterval(pollMetrics, 1500);
 // ═══════════════════════════════════════════════════════════════════════════
 // PROMPT GUIDELINES — copy button
 // ═══════════════════════════════════════════════════════════════════════════
-function glCopy(btn, text) {
+window.glCopy = function(btn, text) {
   navigator.clipboard.writeText(text).then(() => {
     btn.textContent = 'copied';
     btn.classList.add('copied');
