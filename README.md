@@ -1,14 +1,16 @@
 <h1><img src="web/static/chatbot-icon.svg" width="30" height="30"> <img src="web/static/k8s-logo.svg" width="30" height="30"> Cloudera ECS AI Ops Chatbot</h1>
 
-An Agentic AI system for checking a live **Cloudera ECS (Embedded Container Service)** cluster:
+An Agentic AI assistant for your live **Cloudera ECS (Embedded Container Service)** cluster — ask it anything about your cluster in plain English and get informative answers. No `kubectl`, no YAML, needed. Only basic concept of Kubernetes is required.
 
-- **No Kubernetes expertise required** — operators can ask questions in plain English without knowing `kubectl` commands
-- **Instant cluster visibility** — understand the current state of pods, nodes, namespaces, storage, ingress, and deployments through natural language queries
-- **Root cause assistance** — the agent automatically chains tool calls (pod status → describe pod → resource quotas → events) to help diagnose crashes, and pending pods
-- **Secret and credential lookup** — retrieve Kubernetes secrets and database credentials without manually decoding base64 or writing kubectl commands
-- **Database inspection** — run read-only SQL queries inside DB pods (MySQL, PostgreSQL) directly from the chat interface
-- **Documentation-aware answers** — RAG search surfaces relevant runbook entries and known issues alongside live cluster data
-- **Air-gapped friendly** — fully self-contained, no cloud LLM APIs, suitable for secured and isolated environments
+**Here's what you can do:**
+
+- 🔍 **Check cluster health** — ask about the state of pods, nodes, namespaces, storage, ingress, and deployments in plain English
+- 🧠 **Diagnose problems** — the agent automatically chains tool calls (pod status → describe pod → resource quotas → events) to help you understand crashes and pending pods
+- 🔑 **Look up secrets and credentials** — retrieve Kubernetes secrets and database credentials without manually decoding base64 or writing kubectl commands
+- 🗄️ **Query databases directly** — run read-only SQL inside DB pods (MySQL, PostgreSQL) straight from the chat interface
+- 📖 **Get runbook-aware answers** — responses are cross-referenced against your own runbooks and known-issue docs via RAG search
+
+And, it's **air-gapped friendly** — no cloud LLM APIs, suitable for secured and isolated environments.
 
 > ⚠️ **Note:** While the tooling is built on the Kubernetes Python SDK, the system prompt, tool selection logic, and multi-hop reasoning chains are highly curated for ECS and may not work correctly on other Kubernetes distributions with different storage or networking subsystems.
 
