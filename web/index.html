@@ -211,7 +211,7 @@ button{cursor:pointer;font-family:inherit}
 }
 .mtab{
   padding:9px 16px;font-size:12px;font-weight:600;
-  font-family:'IBM Plex Mono',monospace;color:#ffffff;
+  font-family:'IBM Plex Mono',monospace;color:var(--bodyText);
   border:none;background:none;cursor:pointer;
   border-bottom:2px solid transparent;margin-bottom:-1px;
   transition:color .15s,border-color .15s;
@@ -692,14 +692,6 @@ button{cursor:pointer;font-family:inherit}
               <span style="font-size:10px;color:var(--panelDim)">10 — 200</span>
             </div>
           </div>
-        </div>
-        <div class="kb-sheet-filter">
-          <span style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);align-self:center;margin-right:4px">Filter:</span>
-          <button class="kb-sf-btn active" data-sheet="">All Sheets</button>
-          <button class="kb-sf-btn" data-sheet="Known Issues">Known Issues</button>
-          <button class="kb-sf-btn" data-sheet="Dos and Donts">Dos &amp; Don'ts</button>
-          <button class="kb-sf-btn" data-sheet="Prerequisites">Prerequisites</button>
-          <button class="kb-sf-btn" data-sheet="Past Learnings">Past Learnings</button>
         </div>
         <div id="kb-bot-body"></div>
         <div id="kb-bot-input-row">
@@ -1236,20 +1228,10 @@ document.querySelectorAll('.mtab').forEach(btn => {
   const sendBtn   = document.getElementById('kb-bot-send');
   const topkSlider = document.getElementById('kb-topk-slider');
   const topkVal    = document.getElementById('kb-topk-val');
-  let   activeSheet = '';
 
   // Results limit slider
   topkSlider.addEventListener('input', () => {
     topkVal.textContent = topkSlider.value;
-  });
-
-  // Sheet filter pills — use event delegation to guarantee capture
-  document.querySelector('.kb-sheet-filter').addEventListener('click', e => {
-    const btn = e.target.closest('.kb-sf-btn');
-    if(!btn) return;
-    document.querySelectorAll('.kb-sf-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeSheet = btn.dataset.sheet;
   });
 
   // Send on Enter (Shift+Enter = newline)
@@ -1275,7 +1257,6 @@ document.querySelectorAll('.mtab').forEach(btn => {
 
     try {
       const params = new URLSearchParams({ query: q, top_k: topK });
-      if(activeSheet) params.append('sheet', activeSheet);
       const res  = await fetch('/api/rag/query?' + params.toString());
       const data = await res.json();
       spinner.remove();
@@ -1295,8 +1276,7 @@ document.querySelectorAll('.mtab').forEach(btn => {
 
     const qDiv = document.createElement('div');
     qDiv.className = 'kb-answer-q';
-    const sheetTag = activeSheet ? `  [${activeSheet}]` : '';
-    qDiv.textContent = `❓ ${question}${sheetTag}  · top_k=${topK}`;
+    qDiv.textContent = `❓ ${question}  · top_k=${topK}`;
     block.appendChild(qDiv);
 
     const ansDiv = document.createElement('div');
