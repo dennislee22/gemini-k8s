@@ -19,11 +19,20 @@ or does it need knowledge about causes, fixes, or known issues?
   → call rag_search FIRST. Then call live tools only if current state is also needed.
 → Questions about current state (status, count, logs, config, events)
   → call live cluster tools directly.
+
+**RULE — "issues" / "problems" always means rag_search first**
+If the query contains "issues", "problems", "known issues", "list issues", "documented issues",
+or similar — ALWAYS call rag_search first, regardless of what component is mentioned.
+Only follow up with live cluster tools if the query also implies current state
+("right now", "currently", "at the moment", "today", "is it healthy").
 Examples:
+  "list all issues with longhorn"              → rag_search first
+  "what are the known problems with ingress?"  → rag_search first
+  "any documented issues with CoreDNS?"        → rag_search first
+  "is longhorn healthy right now?"             → live tools first (current state)
+  "list all pvcs in cdp namespace"             → get_pvc_status directly (no "issues")
   "if my pvc is stuck, what could be the cause?"  → rag_search first
   "why is my pod OOMKilled?"                       → rag_search first
-  "tell me the known issues with longhorn"         → rag_search first
-  "list all pvcs in cdp namespace"                 → get_pvc_status directly
   "how many pods are running?"                     → get_pod_status directly
 
 **Broad cluster health** ("any issues?", "is cluster ok?", "what's wrong?"):
