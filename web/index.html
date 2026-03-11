@@ -290,12 +290,12 @@ button{cursor:pointer;font-family:inherit}
 .kb-sf-btn:hover{border-color:var(--accent);color:var(--accent2)}
 .kb-sf-btn.active{background:var(--accent)22;border-color:var(--accent);color:var(--accent2)}
 .kb-answer-block{
-  background:var(--msgBg);border:1px solid var(--accent)44;border-radius:10px;
+  background:var(--inputBg);border:1px solid var(--accent)66;border-radius:10px;
   padding:18px 20px;animation:fadeUp .25s ease;
 }
 .kb-answer-q{
-  font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);
-  margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border);
+  font-size:12px;font-family:'IBM Plex Mono',monospace;color:var(--accent2);
+  font-weight:600;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--accent)33;
 }
 .kb-answer-body{font-size:13px;line-height:1.75;color:var(--textMain);white-space:pre-wrap;word-break:break-word}
 .kb-answer-body table{border-collapse:collapse;width:100%;margin:10px 0;font-size:12px;font-family:'IBM Plex Mono',monospace}
@@ -1265,6 +1265,21 @@ document.querySelectorAll('.mtab').forEach(btn => {
 
     const topK = parseInt(topkSlider.value, 10) || 50;
 
+    // Intercept conversational / identity queries — don't hit the vector store
+    const ql = q.toLowerCase().replace(/[?!.,]/g, '').trim();
+    const CONVERSATIONAL = [
+      'who are you', 'what are you', 'what is this', 'what can you do',
+      'help', 'hello', 'hi', 'hey', 'how are you', 'what do you do',
+      'tell me about yourself', 'introduce yourself'
+    ];
+    if(CONVERSATIONAL.some(p => ql === p || ql.startsWith(p))){
+      renderAnswer(q, topK,
+        'I am the ECS Knowledge Bot — a RAG-only interface that searches your ingested knowledge base (runbooks, known issues, dos & don\'ts, prerequisites, and past learnings).\n\nI do not use an LLM or access live cluster data. Ask me about documented issues, fixes, or operational guidance from your uploaded documents.');
+      sendBtn.disabled = false;
+      input.focus();
+      return;
+    }
+
     // Spinner
     const spinner = document.createElement('div');
     spinner.className = 'kb-spinner';
@@ -1290,6 +1305,11 @@ document.querySelectorAll('.mtab').forEach(btn => {
   function renderAnswer(question, topK, raw){
     const block = document.createElement('div');
     block.className = 'kb-answer-block';
+
+    const qDiv = document.createElement('div');
+    qDiv.className = 'kb-answer-q';
+    qDiv.textContent = `› ${question}`;
+    block.appendChild(qDiv);
 
     const ansDiv = document.createElement('div');
     ansDiv.className = 'kb-answer-body';
