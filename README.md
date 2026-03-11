@@ -250,6 +250,7 @@ Interactive docs: **[/docs](http://localhost:9000/docs)** (Swagger) · **[/redoc
 | GET | `/api/pvcs` | PVC / storage status (optional: `?ns=X`) |
 | GET | `/api/namespaces` | All namespaces and their status |
 | GET | `/api/rag/stats` | LanceDB doc chunks and Excel row statistics |
+| GET | `/api/rag/files` | List all previously ingested filenames |
 | GET | `/api/system` | Live CPU / RAM / GPU metrics |
 | POST | `/api/kubeconfig` | Apply a new kubeconfig |
 | POST | `/api/ingest/upload` | Upload docs to LanceDB |

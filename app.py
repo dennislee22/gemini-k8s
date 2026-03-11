@@ -166,7 +166,7 @@ from tools_k8s import K8S_TOOLS, _core, reload_kubeconfig
 
 CHUNK_SIZE    = 512
 CHUNK_OVERLAP = 64
-TOP_K         = 5
+TOP_K         = 10
 
 _embedder_fn  = None
 
@@ -254,6 +254,8 @@ def _get_lancedb():
     excel_schema = pa.schema([
         pa.field("id",            pa.utf8()),
         pa.field("vector",        pa.list_(pa.float32(), _EMBED_DIM)),
+        pa.field("source_file",   pa.utf8()),   # original filename
+        pa.field("file_hash",     pa.utf8()),   # for dedup / listing
         pa.field("sheet",         pa.utf8()),
         pa.field("symptom",       pa.utf8()),   # PRIMARY search column (embedded)
         pa.field("issue_id",      pa.utf8()),
@@ -425,6 +427,7 @@ def ingest_excel(file_path: str, force: bool = False) -> dict:
                     continue
                 rows.append({
                     "id": f"ki-{fhash}-{total}", "vector": embed_text(symptom),
+                    "source_file": path.name, "file_hash": fhash,
                     "sheet": "Known Issues", "symptom": symptom,
                     "issue_id":   _s(row.get("Issue ID", "")),
                     "category":   _s(row.get("Category", "")),
@@ -452,6 +455,7 @@ def ingest_excel(file_path: str, force: bool = False) -> dict:
                     continue
                 rows.append({
                     "id": f"dd-{fhash}-{total}", "vector": embed_text(search_text),
+                    "source_file": path.name, "file_hash": fhash,
                     "sheet": "Dos and Donts", "symptom": search_text,
                     "issue_id": "", "category": _s(row.get("Category", "")),
                     "problem": "", "root_cause": "", "fix": "", "severity": "", "present": "",
@@ -472,6 +476,7 @@ def ingest_excel(file_path: str, force: bool = False) -> dict:
                     continue
                 rows.append({
                     "id": f"pr-{fhash}-{total}", "vector": embed_text(prereq),
+                    "source_file": path.name, "file_hash": fhash,
                     "sheet": "Prerequisites", "symptom": prereq,
                     "issue_id": "", "category": _s(row.get("Category", "")),
                     "problem": _s(row.get("Why It Matters", "")), "root_cause": "",
@@ -495,6 +500,7 @@ def ingest_excel(file_path: str, force: bool = False) -> dict:
                     continue
                 rows.append({
                     "id": f"pl-{fhash}-{total}", "vector": embed_text(search_text),
+                    "source_file": path.name, "file_hash": fhash,
                     "sheet": "Past Learnings", "symptom": search_text,
                     "issue_id": "", "category": "",
                     "problem": _s(row.get("Incident Summary", "")),
@@ -2115,6 +2121,64 @@ async def api_rag_stats():
     curl -s http://localhost:8000/api/rag/stats
     """
     return get_doc_stats()
+
+@api.get("/rag/files", summary="List all ingested files in LanceDB")
+async def api_rag_files():
+    """
+    Returns distinct filenames ingested into both LanceDB tables.
+    curl -s http://localhost:8000/api/rag/files
+    """
+    try:
+        _, docs_tbl, excel_tbl = _get_lancedb()
+        files = []
+
+        # ── Prose docs table ──────────────────────────────────────────────────
+        try:
+            docs_count = docs_tbl.count_rows()
+            if docs_count > 0:
+                rows = docs_tbl.search().limit(docs_count + 1).to_list()
+                seen = {}
+                for r in rows:
+                    src = r.get("source", "")
+                    if src and src not in seen:
+                        seen[src] = {
+                            "filename": Path(src).name,
+                            "type":     r.get("doc_type", "general"),
+                            "table":    "docs",
+                        }
+                files.extend(seen.values())
+        except Exception:
+            pass
+
+        # ── Excel table ───────────────────────────────────────────────────────
+        try:
+            excel_count = excel_tbl.count_rows()
+            if excel_count > 0:
+                rows = excel_tbl.search().limit(excel_count + 1).to_list()
+                seen = {}
+                for r in rows:
+                    fhash = r.get("file_hash", "")
+                    fname = r.get("source_file", f"excel-{fhash[:8]}")
+                    if fhash and fhash not in seen:
+                        seen[fhash] = {
+                            "filename": fname,
+                            "type":     "excel",
+                            "table":    "excel_issues",
+                            "sheets":   set(),
+                            "rows":     0,
+                        }
+                    if fhash in seen:
+                        seen[fhash]["sheets"].add(r.get("sheet", ""))
+                        seen[fhash]["rows"] += 1
+                for v in seen.values():
+                    v["sheets"] = sorted(v["sheets"])
+                files.extend(seen.values())
+        except Exception:
+            pass
+
+        return {"total": len(files), "files": files}
+    except Exception as e:
+        return _JSONResponse(status_code=500, content={"error": str(e)})
 
 @api.get("/system", summary="Live CPU / RAM / GPU utilisation metrics")
 async def api_system():

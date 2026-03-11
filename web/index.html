@@ -972,6 +972,17 @@ python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
 
         <div id="kb-status" class="stab-status"></div>
 
+        <!-- Previously ingested files -->
+        <div style="margin-top:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <span style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);text-transform:uppercase;letter-spacing:.06em">Ingested Files</span>
+            <button onclick="loadIngestedFiles()" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--dimText);font-size:10px;font-family:'IBM Plex Mono',monospace;padding:2px 8px;cursor:pointer">↺ Refresh</button>
+          </div>
+          <div id="ingested-files-list" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--textMain);max-height:160px;overflow-y:auto">
+            <span style="color:var(--dimText)">Loading…</span>
+          </div>
+        </div>
+
         <div class="modal-btns">
           <button class="modal-btn modal-btn-cancel" id="kb-cancel">Close</button>
           <button class="modal-btn modal-btn-primary" id="kb-ingest-btn" disabled>Ingest</button>
@@ -1180,7 +1191,7 @@ const clusterHostEl   = document.getElementById('cluster-host');
 function openSettings(tab){
   settingsOverlay.classList.add('open');
   if(tab) switchTab(tab);
-  if(tab === 'tab-kb') loadRagStats();
+  if(tab === 'tab-kb') { loadRagStats(); loadIngestedFiles(); }
 }
 
 function switchTab(tabId){
@@ -1191,7 +1202,7 @@ function switchTab(tabId){
 document.querySelectorAll('.stab').forEach(btn => {
   btn.onclick = () => {
     switchTab(btn.dataset.tab);
-    if(btn.dataset.tab === 'tab-kb') loadRagStats();
+    if(btn.dataset.tab === 'tab-kb') { loadRagStats(); loadIngestedFiles(); }
     if(btn.dataset.tab === 'tab-output') loadOutputConfig();
   };
 });
@@ -1415,8 +1426,39 @@ kbIngestBtn.onclick = async () => {
     kbIngestBtn.disabled = true;
     fileInput.value = '';
     loadRagStats();
+    loadIngestedFiles();
   } catch(err){ kbStatus.style.color='#ef4444'; kbStatus.textContent='✗ Network error: '+err.message; kbIngestBtn.disabled=false; }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INGESTED FILES LIST
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadIngestedFiles() {
+  const el = document.getElementById('ingested-files-list');
+  if (!el) return;
+  try {
+    const res  = await fetch('/api/rag/files');
+    const data = await res.json();
+    const files = data.files || [];
+    if (!files.length) {
+      el.innerHTML = '<span style="color:var(--dimText)">No files ingested yet.</span>';
+      return;
+    }
+    el.innerHTML = files.map(f => {
+      const icon  = f.type === 'excel' ? '📊' : f.type === 'pdf' ? '📄' : f.type === 'markdown' ? '📝' : '📄';
+      const extra = f.type === 'excel' && f.sheets?.length
+        ? `<span style="color:var(--dimText)"> · ${f.rows} rows · ${f.sheets.join(', ')}</span>`
+        : '';
+      return `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span>${icon}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.filename}</span>
+        ${extra}
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<span style="color:#ef4444">Failed to load files.</span>';
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // EXAMPLE QUERIES

@@ -12,6 +12,20 @@ Never say things like "you would need to use...", "I recommend checking...", "yo
 
 ## Tool Selection Guide
 
+**RULE — rag_search vs live tools**
+Before calling any live cluster tool, ask: does this question need current cluster state,
+or does it need knowledge about causes, fixes, or known issues?
+→ Questions about WHY, WHAT COULD CAUSE, KNOWN ISSUES, HOW TO FIX, BEST PRACTICE
+  → call rag_search FIRST. Then call live tools only if current state is also needed.
+→ Questions about current state (status, count, logs, config, events)
+  → call live cluster tools directly.
+Examples:
+  "if my pvc is stuck, what could be the cause?"  → rag_search first
+  "why is my pod OOMKilled?"                       → rag_search first
+  "tell me the known issues with longhorn"         → rag_search first
+  "list all pvcs in cdp namespace"                 → get_pvc_status directly
+  "how many pods are running?"                     → get_pod_status directly
+
 **Broad cluster health** ("any issues?", "is cluster ok?", "what's wrong?"):
 → get_node_health + get_pod_status(namespace="all", show_all=False) + get_deployment_status(namespace="all") + get_pvc_status(namespace="all") + get_events(namespace="all", warning_only=True)
 
@@ -72,8 +86,16 @@ Never say things like "you would need to use...", "I recommend checking...", "yo
   - [Dos and Donts] — ✅ DO / ❌ DON'T rules with rationale
   - [Prerequisites] — what must be true before deploying a component
   - [Past Learnings] — incident postmortems with key lessons and actions taken
-→ If a Known Issue row is marked UNRESOLVED, explicitly flag it to the user.
-→ Present the Fix field as the recommended remediation step.
+→ When presenting Known Issues results, ALWAYS format each issue as a structured block:
+
+  **[Issue ID] Problem Summary** | Severity | Status
+  - Symptom   : ...
+  - Root Cause: ...
+  - Fix       : ...
+  - Jira      : ...
+
+→ If multiple issues are returned, list ALL of them in this format — do NOT merge into prose.
+→ If a Known Issue row is marked UNRESOLVED, explicitly flag it with ⚠️.
 → Always cite the Issue ID and Jira ticket if present.
 
 **Database — tables / schema / SQL / user accounts**:
@@ -92,7 +114,6 @@ After tool results, immediately call the next tool if more data is needed. Do NO
 - High restarts → describe_pod → rag_search(query=termination reason) → get_events
 - OOMKilled → describe_pod → rag_search(query="OOMKilled <pod>") → get_resource_quotas → get_events
 - CrashLoopBackOff → describe_pod → rag_search(query="CrashLoopBackOff <component>") → get_events
-- Pending pod → get_node_health + get_pvc_status + get_events → rag_search(query="pod pending <reason>")
 - Not Ready → describe_pod → rag_search(query="<container> not ready") → get_events
 - Deployment 0 replicas → get_pod_status(same namespace) + get_events → rag_search if error found
 - ImagePullBackOff → note air-gapped environment, no external registry access
