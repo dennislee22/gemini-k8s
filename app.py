@@ -807,24 +807,24 @@ class AgentState(TypedDict):
 
 def _build_llm():
     """
-    Load tokenizer + model directly from HuggingFace Transformers.
+    Load tokenizer + model. Supports two backends:
 
-    We bypass ChatHuggingFace / HuggingFacePipeline / bind_tools() entirely.
-    Those layers do NOT pass tools= to tokenizer.apply_chat_template(), so
-    Qwen3 never sees the tool schemas and outputs plain text instead of
-    structured tool calls.
+    1. GGUF (CPU-optimised quantised models):
+       Detected when LLM_MODEL ends with .gguf or contains 'gguf' in the name.
+       Uses llama-cpp-python for inference — no GPU required, runs efficiently on CPU.
+       Tool calls are parsed from raw text output (same <tool_call> block format).
 
-    Instead, llm_node calls tokenizer.apply_chat_template(messages, tools=...)
-    directly — exactly what Qwen3 was trained on.
-
-    Qwen3 (https://huggingface.co/Qwen/Qwen3-8B) sampling config:
-    - do_sample=True, temperature=0.7, top_p=0.8, top_k=20, min_p=0.0
-      (Qwen3 non-thinking recommended — greedy causes repetition loops)
-    - max_new_tokens: 256 for tool selection, 2048–8192 for synthesis (scales with KUBECTL_MAX_OUT)
-    - repetition_penalty=1.05  — breaks any remaining loops early
-    - enable_thinking=False passed via apply_chat_template (Jinja template flag)
+    2. HuggingFace Transformers (default):
+       Loads via AutoModelForCausalLM. GPU used automatically if available.
+       Qwen3 native tool-calling via tokenizer.apply_chat_template().
     """
     _log_ag.info(f"[LLM] Loading model: {LLM_MODEL}")
+
+    is_gguf = LLM_MODEL.lower().endswith(".gguf") or "gguf" in LLM_MODEL.lower()
+
+    if is_gguf:
+        return _build_llm_gguf()
+
     try:
         import transformers, torch
 
@@ -853,6 +853,80 @@ def _build_llm():
     except Exception as e:
         _log_ag.error(f"[LLM] Load failed: {e}")
         raise
+
+
+def _build_llm_gguf():
+    """
+    Load a GGUF model via llama-cpp-python for CPU inference.
+
+    Returns a (tokenizer=None, model=<Llama>, is_qwen3) tuple.
+    tokenizer is None — GGUF models use Llama's built-in tokeniser.
+    The llm_node detects tokenizer=None and uses the GGUF inference path.
+
+    Install: pip install llama-cpp-python
+    Environment variables:
+      LLM_MODEL     — path to .gguf file or HF repo/filename containing 'gguf'
+      GGUF_N_CTX    — context window size (default: 8192)
+      GGUF_N_THREADS — CPU threads (default: all available)
+    """
+    try:
+        from llama_cpp import Llama
+    except ImportError:
+        raise ImportError(
+            "llama-cpp-python is required for GGUF models.\n"
+            "Install: pip install llama-cpp-python"
+        )
+
+    import os
+
+    model_path = LLM_MODEL
+    n_ctx      = int(os.environ.get("GGUF_N_CTX", "8192"))
+    n_threads  = int(os.environ.get("GGUF_N_THREADS", str(os.cpu_count() or 4)))
+    n_gpu_layers = 0  # CPU-only — set to -1 to offload all layers to GPU if available
+
+    _log_ag.info(f"[LLM/GGUF] Loading {model_path} | ctx={n_ctx} threads={n_threads}")
+
+    # If given a HF repo string like "org/model-name-GGUF" without a file path,
+    # attempt to pull the largest Q4_K_M or Q4_0 file via huggingface_hub.
+    if not os.path.isfile(model_path):
+        try:
+            from huggingface_hub import hf_hub_download
+            # Try common quantisation filenames in preference order
+            for quant in ["Q4_K_M.gguf", "Q4_0.gguf", "Q5_K_M.gguf", "Q8_0.gguf"]:
+                # Repo id may be "org/repo" — filename is the last path component
+                repo_id  = model_path
+                filename = quant
+                # If model_path looks like "org/repo/filename.gguf" split it
+                parts = model_path.split("/")
+                if len(parts) == 3 and parts[-1].endswith(".gguf"):
+                    repo_id  = "/".join(parts[:2])
+                    filename = parts[-1]
+                    quant    = filename  # skip loop after first match
+                try:
+                    model_path = hf_hub_download(repo_id=repo_id, filename=filename)
+                    _log_ag.info(f"[LLM/GGUF] Downloaded {filename} from {repo_id}")
+                    break
+                except Exception:
+                    continue
+        except ImportError:
+            pass
+
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(
+            f"GGUF model file not found: {model_path}\n"
+            "Provide a full path to a .gguf file, or a HuggingFace repo/filename."
+        )
+
+    model = Llama(
+        model_path=model_path,
+        n_ctx=n_ctx,
+        n_threads=n_threads,
+        n_gpu_layers=n_gpu_layers,
+        verbose=False,
+    )
+    is_qwen3 = "qwen" in model_path.lower()
+    _log_ag.info(f"[LLM/GGUF] Model loaded (CPU, {n_threads} threads, ctx={n_ctx})")
+    return None, model, is_qwen3
 
 def build_agent():
     all_tools = {**K8S_TOOLS, **RAG_TOOLS}
@@ -1134,54 +1208,78 @@ def build_agent():
         # synthesis prompt nudges it to answer if results are sufficient.
         include_tools = True
 
-        # ── Build message list for apply_chat_template ───────────────────────
+        # ── Build message list ────────────────────────────────────────────────
         invoke_msgs = _prepare_messages_for_hf(msgs)
         chat_msgs = [{"role": "system", "content": prompt}] + _msgs_to_qwen3(invoke_msgs, include_tools)
         _log_ag.debug(f"[llm_node itr={itr}] chat_msgs count={len(chat_msgs)} has_tool_results={has_tool_results}")
 
-        # ── Tokenise — always pass tools= ────────────────────────────────────
-        template_kwargs = {"add_generation_prompt": True}
-        if _is_qwen3:
-            template_kwargs["enable_thinking"] = False
-        template_kwargs["tools"] = tool_schemas
-
-        encoded = tokenizer.apply_chat_template(
-            chat_msgs,
-            tokenize=True,
-            return_tensors="pt",
-            **template_kwargs,
-        )
-        input_ids = (encoded["input_ids"] if hasattr(encoded, "__getitem__") and not hasattr(encoded, "shape")
-                     else encoded).to(model.device)
-        input_len = input_ids.shape[-1]
-        _log_ag.debug(f"[llm_node itr={itr}] input tokens={input_len}")
-
         # ── Token budget ──────────────────────────────────────────────────────
-        # Tool selection iters: 512 tokens — enough for 5 parallel tool calls.
-        # Synthesis iter (has_tool_results, no more tool calls expected): full budget.
-        # We don't know in advance if this is synthesis, so always allow full budget
-        # but cap at 512 for the first call when no results exist yet.
         if not has_tool_results:
-            _max_new = 512   # tool selection — raised from 256 for multi-tool calls
+            _max_new = 512
         else:
             _max_new = max(512, min(_MAX_NEW_TOKENS, 1024) if NUM_GPU == 0 else _MAX_NEW_TOKENS)
         _log_ag.debug(f"[llm_node itr={itr}] max_new_tokens={_max_new}")
 
-        with torch.no_grad():
-            output_ids = model.generate(
-                input_ids,
-                max_new_tokens=_max_new,
-                do_sample=True,
+        # ── GGUF path (tokenizer is None) ─────────────────────────────────────
+        if tokenizer is None:
+            # llama-cpp-python: use create_chat_completion for chat format.
+            # Tools are injected into the system prompt as JSON since llama-cpp
+            # doesn't support the apply_chat_template tools= kwarg universally.
+            tools_json = json.dumps(tool_schemas, indent=2)
+            tool_system = (
+                f"{prompt}\n\n"
+                f"Available tools (call using <tool_call>{{\"name\": ..., \"arguments\": {{...}}}}</tool_call>):\n"
+                f"{tools_json}"
+            )
+            gguf_msgs = [{"role": "system", "content": tool_system}]
+            for m in chat_msgs[1:]:   # skip the original system msg — already merged
+                gguf_msgs.append(m)
+
+            resp = model.create_chat_completion(
+                messages=gguf_msgs,
+                max_tokens=_max_new,
                 temperature=0.7,
                 top_p=0.8,
                 top_k=20,
-                repetition_penalty=1.05,
-                pad_token_id=tokenizer.eos_token_id,
+                repeat_penalty=1.05,
             )
+            raw_text = resp["choices"][0]["message"].get("content", "") or ""
+            _log_ag.info(f"[llm_node/GGUF itr={itr}] raw output: {raw_text[:400]!r}")
 
-        new_tokens = output_ids[0][input_len:]
-        raw_text   = tokenizer.decode(new_tokens, skip_special_tokens=True)
-        _log_ag.info(f"[llm_node itr={itr}] raw output: {raw_text[:400]!r}")
+        # ── HuggingFace Transformers path ─────────────────────────────────────
+        else:
+            import torch
+            template_kwargs = {"add_generation_prompt": True}
+            if _is_qwen3:
+                template_kwargs["enable_thinking"] = False
+            template_kwargs["tools"] = tool_schemas
+
+            encoded = tokenizer.apply_chat_template(
+                chat_msgs,
+                tokenize=True,
+                return_tensors="pt",
+                **template_kwargs,
+            )
+            input_ids = (encoded["input_ids"] if hasattr(encoded, "__getitem__") and not hasattr(encoded, "shape")
+                         else encoded).to(model.device)
+            input_len = input_ids.shape[-1]
+            _log_ag.debug(f"[llm_node itr={itr}] input tokens={input_len}")
+
+            with torch.no_grad():
+                output_ids = model.generate(
+                    input_ids,
+                    max_new_tokens=_max_new,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.8,
+                    top_k=20,
+                    repetition_penalty=1.05,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+
+            new_tokens = output_ids[0][input_len:]
+            raw_text   = tokenizer.decode(new_tokens, skip_special_tokens=True)
+            _log_ag.info(f"[llm_node itr={itr}] raw output: {raw_text[:400]!r}")
 
         # ── Parse tool calls ─────────────────────────────────────────────────
         tcs = _parse_tool_calls(raw_text)

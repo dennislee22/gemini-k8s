@@ -189,11 +189,32 @@ MAX_NEW_TOKENS=4096
 LLM_TIMEOUT=300
 ```
 
+**Using a GGUF model (CPU-optimised quantised inference):**
+
+If `LLM_MODEL` ends with `.gguf` or contains `gguf` in the name, the app automatically switches to `llama-cpp-python` for inference — no GPU required.
+
+```ini
+# Path to a local GGUF file
+LLM_MODEL=/models/Qwen3-8B-Q4_K_M.gguf
+
+# Or a HuggingFace repo (downloads the Q4_K_M file automatically)
+LLM_MODEL=Qwen/Qwen3-8B-GGUF
+
+# Optional GGUF tuning
+GGUF_N_CTX=8192       # context window size
+GGUF_N_THREADS=8      # CPU threads (default: all cores)
+```
+
+Install the GGUF backend:
+```bash
+pip install llama-cpp-python
+```
+
 ### 3. Ingest documents
 
 ```bash
 python3 app.py --ingest ./docs
-python3 app.py --ingest ./docs --force   # re-ingest all
+python3 app.py --ingest ./docs --force   # force overwrite all existing
 ```
 
 LanceDB auto-detects file type on ingest:
@@ -201,6 +222,10 @@ LanceDB auto-detects file type on ingest:
 - `.xlsx` / `.xls` → ingested row-by-row into the `excel_issues` table with column-aware embeddings
 
 Place your Excel knowledge base (known issues, dos & don'ts, prerequisites, past learnings) in `docs/` and it will be ingested automatically.
+
+**Deduplication:** Files are hash-checked on every ingest. If the file content has not changed since the last ingest, it is skipped automatically — no duplicate chunks are created. To replace an existing file with updated content, use `--force` (CLI) or tick **Force re-ingest** in the UI.
+
+**Via the UI:** Click ⚙ → **RAG Documents** tab → drop files onto the drop zone → click **Ingest**. Previously ingested filenames are listed in the **Ingested Files** panel at the bottom of the tab. Use **Force re-ingest** to overwrite a file that has changed.
 
 ### 4. Start the server
 

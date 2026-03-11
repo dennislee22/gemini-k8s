@@ -105,7 +105,7 @@ button{cursor:pointer;font-family:inherit}
 #settings-overlay.open{display:flex}
 #settings-modal{
   background:var(--tooltipBg);border:1px solid var(--border);
-  border-radius:16px;width:620px;max-height:92vh;overflow:hidden;
+  border-radius:16px;width:780px;max-height:96vh;overflow:hidden;
   font-family:'IBM Plex Sans',sans-serif;color:var(--textMain);
   box-shadow:0 20px 60px #0008,0 0 40px var(--accent)22;display:flex;flex-direction:column;
 }
@@ -645,19 +645,20 @@ button{cursor:pointer;font-family:inherit}
 
         <!-- ── Injecting Documents ─────────────────────────────────────── -->
         <h2>Knowledge Base (RAG)</h2>
-        <p>The assistant cross-references live cluster data with your runbooks, known-issues docs, and SOPs via <strong>ChromaDB RAG</strong>.</p>
+        <p>The assistant cross-references live cluster data with your runbooks, known-issues docs, and SOPs via <strong>LanceDB RAG</strong>.</p>
 
         <h3>Via the Settings UI</h3>
         <ol>
-          <li>Click &#9881; → <strong>Knowledge Base</strong> tab.</li>
+          <li>Click &#9881; → <strong>RAG Documents</strong> tab.</li>
           <li>Drop <code>.md</code>, <code>.pdf</code>, <code>.txt</code>, <code>.xlsx</code>, or <code>.xls</code> files onto the drop zone.</li>
-          <li>Optionally tick <em>Force re-ingest</em> to overwrite existing entries.</li>
-          <li>Click <strong>Ingest</strong>.</li>
+          <li>Click <strong>Ingest</strong>. Previously ingested files with the same content are automatically skipped (deduplication is hash-based).</li>
+          <li>To replace an existing file with updated content, tick <em>Force re-ingest</em> before clicking Ingest — this overwrites the existing chunks regardless of hash.</li>
         </ol>
+        <p style="font-size:11px;color:var(--dimText)">💡 All previously ingested files are listed in the <em>Ingested Files</em> panel at the bottom of the tab.</p>
 
         <h3>Via server-side directory</h3>
         <pre><code>python3 app.py --ingest ./docs
-python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
+python3 app.py --ingest ./docs --force   # force overwrite all</code></pre>
 
         <!-- ── System Prompt ───────────────────────────────────────────── -->
         <h2>Customising the System Prompt</h2>
@@ -960,8 +961,9 @@ python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
         <div style="display:flex;align-items:center;gap:10px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText)">
           <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
             <input type="checkbox" id="force-reingest" style="accent-color:var(--accent)"/>
-            <span style="font-size:12px;color:var(--textMain);font-family:'IBM Plex Mono',monospace">Force re-ingest (overwrite existing)</span>
+            <span style="font-size:12px;color:var(--textMain);font-family:'IBM Plex Mono',monospace">Force re-ingest — overwrite if already ingested</span>
           </label>
+          <span style="font-size:10px;color:var(--dimText);margin-left:4px">Unchanged files are skipped automatically. Tick this only to replace updated content.</span>
         </div>
 
         <!-- Results table (shown after ingest) -->
@@ -978,7 +980,7 @@ python3 app.py --ingest ./docs --force   # re-ingest all</code></pre>
             <span style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);text-transform:uppercase;letter-spacing:.06em">Ingested Files</span>
             <button onclick="loadIngestedFiles()" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--dimText);font-size:10px;font-family:'IBM Plex Mono',monospace;padding:2px 8px;cursor:pointer">↺ Refresh</button>
           </div>
-          <div id="ingested-files-list" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--textMain);max-height:160px;overflow-y:auto">
+          <div id="ingested-files-list" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--textMain);max-height:240px;overflow-y:auto">
             <span style="color:var(--dimText)">Loading…</span>
           </div>
         </div>
