@@ -87,50 +87,50 @@ button{cursor:pointer;font-family:inherit}
 
 /* Settings gear button — no circle, slow rotation */
 @keyframes gearSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-#settings-btn{
-  background:none;border:none;
-  display:flex;align-items:center;justify-content:center;
-  cursor:pointer;font-size:26px;color:var(--accent);
-  padding:0;flex-shrink:0;
-  animation:gearSpin 8s linear infinite;
-  transition:color .2s,font-size .2s;
-}
-#settings-btn:hover{color:var(--accent2);animation-duration:1.5s;}
 
-/* Settings modal */
-#settings-overlay{
-  position:fixed;inset:0;background:#0009;z-index:9000;
-  display:none;align-items:center;justify-content:center;
-}
-#settings-overlay.open{display:flex}
-#settings-modal{
-  background:var(--tooltipBg);border:1px solid var(--border);
-  border-radius:16px;width:780px;max-height:96vh;overflow:hidden;
+/* ── Settings pane (full inline pane, no overlay) ────────────────────────── */
+#settings-pane{
+  flex:1;display:none;overflow:hidden;
   font-family:'IBM Plex Sans',sans-serif;color:var(--textMain);
-  box-shadow:0 20px 60px #0008,0 0 40px var(--accent)22;display:flex;flex-direction:column;
 }
-#settings-modal h3{
-  font-size:16px;font-weight:700;color:var(--accent2);
-  font-family:'IBM Plex Mono',monospace;letter-spacing:.06em;
-  padding:22px 24px 0;flex-shrink:0;display:flex;align-items:center;gap:10px;
+#settings-pane.active{display:flex;flex-direction:row}
+
+/* Left nav sidebar */
+.stab-sidebar{
+  width:180px;flex-shrink:0;
+  background:var(--headerBg);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;padding:20px 0;gap:2px;
 }
-#settings-modal h3 .modal-gear{font-size:26px;color:var(--accent);filter:drop-shadow(0 0 6px var(--accent)99);}
-.stab-row{
-  display:flex;gap:0;padding:14px 24px 0;border-bottom:1px solid var(--border);
-  flex-shrink:0;
+.stab-sidebar-title{
+  font-size:10px;font-weight:700;font-family:'IBM Plex Mono',monospace;
+  color:var(--dimText);letter-spacing:.1em;text-transform:uppercase;
+  padding:0 18px 12px;
 }
 .stab{
-  padding:8px 18px;font-size:12px;font-weight:600;font-family:'IBM Plex Mono',monospace;
-  border:1px solid transparent;border-bottom:none;border-radius:6px 6px 0 0;
-  cursor:pointer;color:var(--dimText);background:none;
-  margin-bottom:-1px;transition:color .15s,background .15s;
+  display:flex;align-items:center;gap:9px;
+  padding:10px 18px;font-size:12px;font-weight:600;
+  font-family:'IBM Plex Mono',monospace;
+  border:none;background:none;cursor:pointer;
+  color:var(--dimText);text-align:left;width:100%;
+  border-left:3px solid transparent;
+  transition:color .15s,background .15s,border-color .15s;
 }
+.stab:hover{color:var(--accent2);background:var(--inputBg)22}
 .stab.active{
-  color:var(--accent2);background:var(--tooltipBg);
-  border-color:var(--border);
+  color:var(--accent2);background:var(--inputBg);
+  border-left-color:var(--accent);
 }
-.stab-pane{display:none;flex-direction:column;gap:12px;padding:20px 24px 22px;overflow-y:auto;flex:1}
+.stab-icon{font-size:14px;flex-shrink:0}
+
+/* Right content area */
+.stab-content{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+.stab-pane{display:none;flex-direction:column;gap:14px;padding:28px 32px;flex:1}
 .stab-pane.active{display:flex}
+.stab-pane-title{
+  font-size:15px;font-weight:700;color:var(--accent2);
+  font-family:'IBM Plex Mono',monospace;letter-spacing:.04em;
+  padding-bottom:14px;border-bottom:1px solid var(--border);flex-shrink:0;
+}
 .stab-pane p{font-size:12px;color:var(--textMain);font-family:'IBM Plex Mono',monospace;margin:0}
 #kube-textarea,.stab-textarea{
   width:100%;height:180px;resize:vertical;
@@ -141,14 +141,14 @@ button{cursor:pointer;font-family:inherit}
 }
 #kube-textarea:focus,.stab-textarea:focus{outline:none;border-color:var(--accent)}
 .stab-status{font-size:12px;font-family:'IBM Plex Mono',monospace;min-height:18px}
-.modal-btns{display:flex;gap:8px;justify-content:flex-end}
+.modal-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:auto;padding-top:8px}
 .modal-btn{
   padding:9px 20px;border-radius:8px;font-size:13px;font-weight:600;
   font-family:'IBM Plex Mono',monospace;cursor:pointer;transition:all .15s;border:none;
 }
 .modal-btn-primary{background:var(--accent);color:#000}
 .modal-btn-primary:hover{filter:brightness(1.15)}
-.modal-btn-cancel{background:var(--border);color:var(--dimText)}
+.modal-btn-cancel{background:var(--border);color:var(--dimText);display:none}
 .modal-btn-cancel:hover{color:var(--textMain)}
 /* Drop zone */
 #drop-zone{
@@ -250,6 +250,68 @@ button{cursor:pointer;font-family:inherit}
 #guidelines-pane tr:nth-child(even) td{background:var(--headerBg)55}
 #guidelines-pane .tip{background:var(--inputBg);border-left:3px solid var(--accent);border-radius:0 8px 8px 0;padding:10px 14px;margin:10px 0 16px;font-size:13px}
 #guidelines-pane .warn{background:#1c1200;border-left:3px solid #f59e0b;border-radius:0 8px 8px 0;padding:10px 14px;margin:10px 0 16px;font-size:13px}
+
+/* Knowledge Bot pane */
+#kb-bot-pane{
+  flex:1;overflow-y:auto;display:none;flex-direction:column;gap:0;
+  font-family:'IBM Plex Sans',sans-serif;font-size:14px;
+  color:var(--bodyText);
+}
+#kb-bot-pane.active{display:flex}
+#kb-bot-header{
+  padding:18px 24px 14px;border-bottom:1px solid var(--border);flex-shrink:0;
+}
+#kb-bot-header h2{
+  font-size:15px;font-weight:700;color:var(--accent2);
+  font-family:'IBM Plex Mono',monospace;letter-spacing:.04em;margin-bottom:4px;
+}
+#kb-bot-header p{font-size:12px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin:0}
+#kb-bot-body{flex:1;overflow-y:auto;padding:18px 24px;display:flex;flex-direction:column;gap:14px}
+#kb-bot-input-row{display:flex;gap:8px;align-items:flex-end;padding:14px 24px;border-top:1px solid var(--border);flex-shrink:0;background:var(--headerBg)}
+#kb-bot-input{
+  flex:1;background:var(--inputBg);border:1px solid var(--border);border-radius:8px;
+  color:var(--inputText);font-family:'IBM Plex Mono',monospace;font-size:13px;
+  padding:10px 14px;resize:none;line-height:1.5;
+}
+#kb-bot-input:focus{outline:none;border-color:var(--accent)}
+#kb-bot-send{
+  background:var(--accent);color:#000;font-weight:700;font-size:13px;
+  font-family:'IBM Plex Mono',monospace;border:none;border-radius:8px;
+  padding:10px 18px;flex-shrink:0;transition:opacity .15s;
+}
+#kb-bot-send:disabled{opacity:.4;cursor:not-allowed}
+#kb-bot-send:not(:disabled):hover{opacity:.85}
+.kb-sheet-filter{display:flex;gap:6px;flex-wrap:wrap;padding:0 24px 12px;flex-shrink:0}
+.kb-sf-btn{
+  font-size:11px;font-family:'IBM Plex Mono',monospace;font-weight:600;
+  padding:4px 10px;border-radius:4px;border:1px solid var(--border);
+  background:var(--inputBg);color:var(--dimText);transition:all .15s;
+}
+.kb-sf-btn:hover{border-color:var(--accent);color:var(--accent2)}
+.kb-sf-btn.active{background:var(--accent)22;border-color:var(--accent);color:var(--accent2)}
+.kb-answer-block{
+  background:var(--msgBg);border:1px solid var(--border);border-radius:10px;
+  padding:18px 20px;animation:fadeUp .25s ease;
+}
+.kb-answer-q{
+  font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);
+  margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border);
+}
+.kb-answer-body{font-size:13px;line-height:1.75;color:var(--bodyText);white-space:pre-wrap;word-break:break-word}
+.kb-answer-body table{border-collapse:collapse;width:100%;margin:10px 0;font-size:12px;font-family:'IBM Plex Mono',monospace}
+.kb-answer-body th{background:var(--inputBg);color:var(--panelLabel);font-weight:700;padding:7px 12px;border:1px solid var(--border);text-align:left;font-size:11px;letter-spacing:.04em}
+.kb-answer-body td{padding:6px 12px;border:1px solid var(--border);color:var(--bodyText);vertical-align:top}
+.kb-answer-body tr:nth-child(even) td{background:var(--headerBg)55}
+.kb-copy-btn{
+  margin-top:12px;font-size:11px;font-family:'IBM Plex Mono',monospace;
+  background:none;border:1px solid var(--border);border-radius:4px;
+  color:var(--dimText);padding:4px 12px;transition:all .15s;
+}
+.kb-copy-btn:hover{border-color:var(--accent);color:var(--accent2)}
+.kb-spinner{display:flex;align-items:center;gap:8px;font-size:12px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);padding:12px 0}
+.kb-spinner span{animation:dotPulse 1.4s ease-in-out infinite}
+.kb-spinner span:nth-child(2){animation-delay:.2s}
+.kb-spinner span:nth-child(3){animation-delay:.4s}
 .gl-tag{display:inline-block;font-size:10px;font-weight:700;font-family:'IBM Plex Mono',monospace;padding:2px 7px;border-radius:4px;margin-right:5px;vertical-align:middle;white-space:nowrap}
 .gl-tag-cluster{background:#0c2340;color:#38bdf8}
 .gl-tag-pod{background:#14532d;color:#86efac}
@@ -575,8 +637,6 @@ button{cursor:pointer;font-family:inherit}
         <span id="theme-name">Midnight</span>
       </div>
       <span id="cluster-host" style="font-size:10px;color:var(--accent);font-family:'IBM Plex Mono',monospace">· Connected ECS: unknown</span>
-      <!-- Settings gear -->
-      <button id="settings-btn" title="Settings">&#9881;</button>
     </div>
   </div>
 
@@ -589,6 +649,8 @@ button{cursor:pointer;font-family:inherit}
       <!-- ── Main tab bar ───────────────────────────────────────────────── -->
       <div id="main-tabs">
         <button class="mtab active" data-pane="chat-pane"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-2px;margin-right:4px"><path d="M18 3a4 4 0 0 1 4 4v8a4 4 0 0 1 -4 4h-4.724l-4.762 2.857a1 1 0 0 1 -1.508 -.743l-.006 -.114v-2h-1a4 4 0 0 1 -3.995 -3.8l-.005 -.2v-8a4 4 0 0 1 4 -4zm-2.8 9.286a1 1 0 0 0 -1.414 .014a2.5 2.5 0 0 1 -3.572 0a1 1 0 0 0 -1.428 1.4a4.5 4.5 0 0 0 6.428 0a1 1 0 0 0 -.014 -1.414m-5.69 -4.286h-.01a1 1 0 1 0 0 2h.01a1 1 0 0 0 0 -2m5 0h-.01a1 1 0 0 0 0 2h.01a1 1 0 0 0 0 -2" /></svg> ECS AI Ops Chatbot</button>
+        <button class="mtab" data-pane="kb-bot-pane">&#128218; ECS Knowledge Bot</button>
+        <button class="mtab" data-pane="settings-pane">&#9881; Settings</button>
         <button class="mtab" data-pane="readme-pane">&#128214; README</button>
         <button class="mtab" data-pane="guidelines-pane">&#128203; Prompt Guidelines</button>
       </div>
@@ -608,6 +670,42 @@ button{cursor:pointer;font-family:inherit}
           <textarea id="chat-input" rows="2"
             placeholder="Ask about cluster health, Longhorn storage, pod issues, logs, events&hellip; (Enter to send)"></textarea>
           <button id="send-btn">&#8594; Send</button>
+        </div>
+      </div>
+
+      <!-- ── ECS Knowledge Bot pane ───────────────────────────────────────── -->
+      <div id="kb-bot-pane">
+        <div id="kb-bot-header">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+            <div>
+              <h2>&#128218; ECS Knowledge Bot</h2>
+              <p>RAG-only answers from your ingested runbooks, known issues, and SOPs &mdash; no live cluster data.</p>
+            </div>
+            <!-- Results limit control -->
+            <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;font-family:'IBM Plex Mono',monospace">
+              <label style="font-size:11px;color:var(--dimText);white-space:nowrap">
+                Max results: <strong id="kb-topk-val" style="color:var(--accent2)">50</strong>
+              </label>
+              <input type="range" id="kb-topk-slider"
+                min="10" max="200" step="10" value="50"
+                style="width:120px;accent-color:var(--accent);cursor:pointer;height:5px"
+                title="How many knowledge base entries to retrieve. Increase if answers seem incomplete."/>
+              <span style="font-size:10px;color:var(--panelDim)">10 — 200</span>
+            </div>
+          </div>
+        </div>
+        <div class="kb-sheet-filter">
+          <span style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);align-self:center;margin-right:4px">Filter:</span>
+          <button class="kb-sf-btn active" data-sheet="">All Sheets</button>
+          <button class="kb-sf-btn" data-sheet="Known Issues">Known Issues</button>
+          <button class="kb-sf-btn" data-sheet="Dos and Donts">Dos &amp; Don'ts</button>
+          <button class="kb-sf-btn" data-sheet="Prerequisites">Prerequisites</button>
+          <button class="kb-sf-btn" data-sheet="Past Learnings">Past Learnings</button>
+        </div>
+        <div id="kb-bot-body"></div>
+        <div id="kb-bot-input-row">
+          <textarea id="kb-bot-input" rows="2" placeholder="Ask about known issues, dos &amp; don'ts, prerequisites, past learnings… (Enter to send)"></textarea>
+          <button id="kb-bot-send">&#8594; Ask</button>
         </div>
       </div>
 
@@ -823,6 +921,183 @@ python3 app.py --ingest ./docs --force   # force overwrite all</code></pre>
 
       </div><!-- #guidelines-pane -->
 
+      <!-- ── Settings pane ────────────────────────────────────────────────── -->
+      <div id="settings-pane">
+
+        <!-- Left vertical nav -->
+        <nav class="stab-sidebar">
+          <div class="stab-sidebar-title">&#9881; Settings</div>
+          <button class="stab active" data-tab="tab-cluster"><span class="stab-icon">&#128279;</span>Kubeconfig</button>
+          <button class="stab" data-tab="tab-kb"><span class="stab-icon">&#128196;</span>RAG Documents</button>
+          <button class="stab" data-tab="tab-output"><span class="stab-icon">&#127919;</span>LLM Input/Output</button>
+          <button class="stab" data-tab="tab-security"><span class="stab-icon">&#128274;</span>Security</button>
+        </nav>
+
+        <!-- Right content -->
+        <div class="stab-content">
+
+          <!-- ── Tab: Cluster ── -->
+          <div class="stab-pane active" id="tab-cluster">
+            <div class="stab-pane-title">&#128279; Kubeconfig</div>
+            <p>Paste the kubeconfig for the target Kubernetes cluster.</p>
+            <textarea id="kube-textarea" placeholder="apiVersion: v1&#10;kind: Config&#10;clusters:&#10;- cluster:&#10;    server: https://&lt;host&gt;:6443&#10;  ..."></textarea>
+            <div id="kube-status" class="stab-status"></div>
+            <div class="modal-btns">
+              <button class="modal-btn modal-btn-cancel" id="settings-cancel">Close</button>
+              <button class="modal-btn modal-btn-primary" id="settings-apply">Apply</button>
+            </div>
+          </div>
+
+          <!-- ── Tab: Knowledge Base ── -->
+          <div class="stab-pane" id="tab-kb">
+            <div class="stab-pane-title">&#128196; RAG Documents</div>
+            <p>Upload .md, .pdf, .txt, .xlsx, or .xls documents to inject into the vector database for RAG retrieval.</p>
+
+            <!-- RAG stats -->
+            <div id="rag-stats-bar">
+              <span>Chunks:<span class="rs-val" id="rs-chunks">—</span></span>
+              <span>Files:<span class="rs-val" id="rs-files">—</span></span>
+              <span>By type:<span class="rs-val" id="rs-types">—</span></span>
+            </div>
+
+            <!-- Drop zone -->
+            <div id="drop-zone">
+              <input type="file" id="doc-file-input" multiple accept=".md,.pdf,.txt,.xlsx,.xls"/>
+              <span id="drop-zone-label">Drop files here or click to browse</span>
+              <span>.md &nbsp;·&nbsp; .pdf &nbsp;·&nbsp; .txt &nbsp;·&nbsp; .xlsx &nbsp;·&nbsp; .xls</span>
+            </div>
+
+            <!-- Selected files list -->
+            <div id="selected-files" style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
+
+            <!-- Options row -->
+            <div style="display:flex;align-items:center;gap:10px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText)">
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+                <input type="checkbox" id="force-reingest" style="accent-color:var(--accent)"/>
+                <span style="font-size:12px;color:var(--textMain);font-family:'IBM Plex Mono',monospace">Force re-ingest — overwrite if already ingested</span>
+              </label>
+              <span style="font-size:10px;color:var(--dimText);margin-left:4px">Unchanged files are skipped automatically. Tick this only to replace updated content.</span>
+            </div>
+
+            <!-- Results table (shown after ingest) -->
+            <div id="ingest-results" style="display:none">
+              <div class="ir-row hdr"><span>File</span><span>Status</span><span>Chunks</span></div>
+              <div id="ir-body"></div>
+            </div>
+
+            <div id="kb-status" class="stab-status"></div>
+
+            <!-- Previously ingested files -->
+            <div style="margin-top:4px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <span style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);text-transform:uppercase;letter-spacing:.06em">Ingested Files</span>
+                <button onclick="loadIngestedFiles()" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--dimText);font-size:10px;font-family:'IBM Plex Mono',monospace;padding:2px 8px;cursor:pointer">↺ Refresh</button>
+              </div>
+              <div id="ingested-files-list" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--textMain);max-height:240px;overflow-y:auto">
+                <span style="color:var(--dimText)">Loading…</span>
+              </div>
+            </div>
+
+            <div class="modal-btns">
+              <button class="modal-btn modal-btn-cancel" id="kb-cancel">Close</button>
+              <button class="modal-btn modal-btn-primary" id="kb-ingest-btn" disabled>Ingest</button>
+            </div>
+          </div>
+
+          <!-- ── Tab: Output ── -->
+          <div class="stab-pane" id="tab-output">
+            <div class="stab-pane-title">&#127919; LLM Input / Output</div>
+            <div class="tip" style="border-left:3px solid #ef4444;color:var(--textMain);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px 10px;background:var(--tooltipBg);border-radius:0 4px 4px 0;margin-bottom:4px">
+              💡 <strong style="color:#ef4444">Tip:</strong>
+              <strong>Max Input Chars</strong> controls how much cluster data the LLM <em>reads</em>.
+              <strong>Max Response Tokens</strong> controls how much the LLM <em>writes</em> (~4 chars/token).
+              Both can independently cause truncation — increase both if responses are cut off.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:18px;padding:4px 0">
+
+              <div>
+                <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
+                  MAX INPUT CHARS (tool → LLM) &nbsp;<span style="color:var(--accent);font-size:14px;font-weight:700" id="max-chars-val">20,000</span>
+                </label>
+                <input type="range" id="max-chars-slider" min="5000" max="100000" step="5000" value="20000"
+                  style="width:100%;accent-color:var(--accent);cursor:pointer;height:6px"/>
+                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace;margin-top:4px">
+                  <span>5 000</span><span>50 000</span><span>100 000</span>
+                </div>
+                <p style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin-top:4px">
+                  <code>KUBECTL_MAX_CHARS</code> — raw K8s tool output characters fed into the LLM context window.
+                </p>
+              </div>
+
+              <div>
+                <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
+                  MAX RESPONSE TOKENS (LLM output) &nbsp;<span style="color:var(--accent);font-size:14px;font-weight:700" id="max-tokens-val">4,096</span>
+                </label>
+                <input type="range" id="max-tokens-slider" min="512" max="8192" step="512" value="4096"
+                  style="width:100%;accent-color:var(--accent);cursor:pointer;height:6px"/>
+                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace;margin-top:4px">
+                  <span>512</span><span>4 096</span><span>8 192</span>
+                </div>
+                <p style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin-top:4px">
+                  <code>MAX_NEW_TOKENS</code> — tokens the LLM can generate per response (~4 chars/token). Higher = longer answers but more VRAM and slower.
+                </p>
+              </div>
+
+              <div>
+                <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
+                  LLM TIMEOUT (seconds) &nbsp;<span style="color:var(--accent);font-size:14px;font-weight:700" id="llm-timeout-val">300</span>
+                </label>
+                <input type="range" id="llm-timeout-slider" min="60" max="900" step="30" value="300"
+                  style="width:100%;accent-color:var(--accent);cursor:pointer;height:6px"/>
+                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace;margin-top:4px">
+                  <span>60s</span><span>5 min</span><span>15 min</span>
+                </div>
+                <p style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin-top:4px">
+                  <code>LLM_TIMEOUT</code> — hard timeout per request. Increase for very large clusters or complex multi-tool queries.
+                </p>
+              </div>
+
+            </div>
+            <div id="output-status" class="stab-status"></div>
+            <div class="modal-btns">
+              <button class="modal-btn modal-btn-cancel" id="output-cancel">Close</button>
+              <button class="modal-btn modal-btn-primary" id="output-apply">Apply</button>
+            </div>
+          </div>
+
+          <!-- ── Tab: Security ── -->
+          <div class="stab-pane" id="tab-security">
+            <div class="stab-pane-title">&#128274; Security</div>
+            <div style="border-left:3px solid #f59e0b;color:var(--textMain);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px 10px;background:var(--tooltipBg);border-radius:0 4px 4px 0;margin-bottom:14px">
+              ⚠️ <strong style="color:#f59e0b">Warning:</strong>
+              Enabling this option will show decoded secret values — including passwords, tokens, and certificates — directly in the chat. Only enable in a secure, private session.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:18px;padding:4px 0">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+                <div>
+                  <div style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;margin-bottom:4px">SHOW SECRET VALUES</div>
+                  <div style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace">
+                    When enabled, K8s secret data (passwords, tokens, certs) are base64-decoded and shown in responses. Default: off.
+                  </div>
+                </div>
+                <label id="secret-toggle-label" style="position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;cursor:pointer">
+                  <input type="checkbox" id="secret-decode-toggle" style="opacity:0;width:0;height:0">
+                  <span id="secret-toggle-track" style="position:absolute;inset:0;background:var(--border);border-radius:24px;transition:background .2s"></span>
+                  <span id="secret-toggle-thumb" style="position:absolute;left:3px;top:3px;width:18px;height:18px;background:#fff;border-radius:50%;transition:transform .2s;box-shadow:0 1px 3px #0006"></span>
+                </label>
+              </div>
+              <div id="secret-toggle-status" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);min-height:16px">
+                🔒 Secret values are hidden (safe mode)
+              </div>
+            </div>
+            <div class="modal-btns" style="margin-top:auto">
+              <button class="modal-btn modal-btn-cancel" id="security-cancel">Close</button>
+            </div>
+          </div>
+
+        </div><!-- .stab-content -->
+      </div><!-- #settings-pane -->
+
     </div><!-- #chat-col -->
 
     <!-- Right panels -->
@@ -849,6 +1124,9 @@ python3 app.py --ingest ./docs --force   # force overwrite all</code></pre>
           <div class="infer-badge" id="cpu-infer-badge" style="margin-left:auto">
             <span id="infer-txt-cpu" style="color:var(--panelDim)">detecting&hellip;</span>
           </div>
+        </div>
+        <div style="padding:4px 12px 8px;font-size:10px;font-family:'IBM Plex Mono',monospace;color:var(--panelDim)">
+          Model: <span id="infer-model-name" style="color:var(--accent2)">—</span>
         </div>
       </div>
 
@@ -912,183 +1190,6 @@ python3 app.py --ingest ./docs --force   # force overwrite all</code></pre>
 
     </div><!-- #panels -->
   </div><!-- #body -->
-  <!-- ═══ SETTINGS MODAL ══════════════════════════════════════════════════ -->
-  <div id="settings-overlay">
-    <div id="settings-modal">
-      <h3><span class="modal-gear">&#9881;</span> SETTINGS</h3>
-
-      <!-- Tab bar -->
-      <div class="stab-row">
-        <button class="stab active" data-tab="tab-cluster">Kubeconfig</button>
-        <button class="stab" data-tab="tab-kb">RAG Documents</button>
-        <button class="stab" data-tab="tab-output">LLM Input/Output</button>
-        <button class="stab" data-tab="tab-security">Security</button>
-      </div>
-
-      <!-- ── Tab: Cluster ── -->
-      <div class="stab-pane active" id="tab-cluster">
-        <p>Paste the kubeconfig for the target Kubernetes cluster.</p>
-        <textarea id="kube-textarea" placeholder="apiVersion: v1&#10;kind: Config&#10;clusters:&#10;- cluster:&#10;    server: https://&lt;host&gt;:6443&#10;  ..."></textarea>
-        <div id="kube-status" class="stab-status"></div>
-        <div class="modal-btns">
-          <button class="modal-btn modal-btn-cancel" id="settings-cancel">Close</button>
-          <button class="modal-btn modal-btn-primary" id="settings-apply">Apply</button>
-        </div>
-      </div>
-
-      <!-- ── Tab: Knowledge Base ── -->
-      <div class="stab-pane" id="tab-kb">
-        <p>Upload .md, .pdf, .txt, .xlsx, or .xls documents to inject into the vector database for RAG retrieval.</p>
-
-        <!-- RAG stats -->
-        <div id="rag-stats-bar">
-          <span>Chunks:<span class="rs-val" id="rs-chunks">—</span></span>
-          <span>Files:<span class="rs-val" id="rs-files">—</span></span>
-          <span>By type:<span class="rs-val" id="rs-types">—</span></span>
-        </div>
-
-        <!-- Drop zone -->
-        <div id="drop-zone">
-          <input type="file" id="doc-file-input" multiple accept=".md,.pdf,.txt,.xlsx,.xls"/>
-          <span id="drop-zone-label">Drop files here or click to browse</span>
-          <span>.md &nbsp;·&nbsp; .pdf &nbsp;·&nbsp; .txt &nbsp;·&nbsp; .xlsx &nbsp;·&nbsp; .xls</span>
-        </div>
-
-        <!-- Selected files list -->
-        <div id="selected-files" style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
-
-        <!-- Options row -->
-        <div style="display:flex;align-items:center;gap:10px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText)">
-          <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
-            <input type="checkbox" id="force-reingest" style="accent-color:var(--accent)"/>
-            <span style="font-size:12px;color:var(--textMain);font-family:'IBM Plex Mono',monospace">Force re-ingest — overwrite if already ingested</span>
-          </label>
-          <span style="font-size:10px;color:var(--dimText);margin-left:4px">Unchanged files are skipped automatically. Tick this only to replace updated content.</span>
-        </div>
-
-        <!-- Results table (shown after ingest) -->
-        <div id="ingest-results" style="display:none">
-          <div class="ir-row hdr"><span>File</span><span>Status</span><span>Chunks</span></div>
-          <div id="ir-body"></div>
-        </div>
-
-        <div id="kb-status" class="stab-status"></div>
-
-        <!-- Previously ingested files -->
-        <div style="margin-top:18px">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-            <span style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);text-transform:uppercase;letter-spacing:.06em">Ingested Files</span>
-            <button onclick="loadIngestedFiles()" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--dimText);font-size:10px;font-family:'IBM Plex Mono',monospace;padding:2px 8px;cursor:pointer">↺ Refresh</button>
-          </div>
-          <div id="ingested-files-list" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--textMain);max-height:240px;overflow-y:auto">
-            <span style="color:var(--dimText)">Loading…</span>
-          </div>
-        </div>
-
-        <div class="modal-btns">
-          <button class="modal-btn modal-btn-cancel" id="kb-cancel">Close</button>
-          <button class="modal-btn modal-btn-primary" id="kb-ingest-btn" disabled>Ingest</button>
-        </div>
-      </div>
-
-      <!-- ── Tab: Output ── -->
-      <div class="stab-pane" id="tab-output">
-        <div class="tip" style="border-left:3px solid #ef4444;color:var(--textMain);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px 10px;background:var(--tooltipBg);border-radius:0 4px 4px 0;margin-bottom:14px">
-          💡 <strong style="color:#ef4444">Tip:</strong>
-          <strong>Max Input Chars</strong> controls how much cluster data the LLM <em>reads</em>.
-          <strong>Max Response Tokens</strong> controls how much the LLM <em>writes</em> (~4 chars/token).
-          Both can independently cause truncation — increase both if responses are cut off.
-        </div>
-        <div style="display:flex;flex-direction:column;gap:18px;padding:4px 0">
-
-          <!-- Slider 1: KUBECTL_MAX_CHARS -->
-          <div>
-            <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
-              MAX INPUT CHARS (tool → LLM) &nbsp;<span style="color:var(--accent);font-size:14px;font-weight:700" id="max-chars-val">20,000</span>
-            </label>
-            <input type="range" id="max-chars-slider"
-              min="5000" max="100000" step="5000" value="20000"
-              style="width:100%;accent-color:var(--accent);cursor:pointer;height:6px"/>
-            <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-              <span>5 000</span><span>50 000</span><span>100 000</span>
-            </div>
-            <p style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-              <code>KUBECTL_MAX_CHARS</code> — raw K8s tool output characters fed into the LLM context window.
-            </p>
-          </div>
-
-          <!-- Slider 2: MAX_NEW_TOKENS -->
-          <div>
-            <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
-              MAX RESPONSE TOKENS (LLM output) &nbsp;<span style="color:var(--accent);font-size:14px;font-weight:700" id="max-tokens-val">4,096</span>
-            </label>
-            <input type="range" id="max-tokens-slider"
-              min="512" max="8192" step="512" value="4096"
-              style="width:100%;accent-color:var(--accent);cursor:pointer;height:6px"/>
-            <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-              <span>512</span><span>4 096</span><span>8 192</span>
-            </div>
-            <p style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-              <code>MAX_NEW_TOKENS</code> — tokens the LLM can generate per response (~4 chars/token). Higher = longer answers but more VRAM and slower.
-            </p>
-          </div>
-
-          <!-- Slider 3: LLM_TIMEOUT -->
-          <div>
-            <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
-              LLM TIMEOUT (seconds) &nbsp;<span style="color:var(--accent);font-size:14px;font-weight:700" id="llm-timeout-val">300</span>
-            </label>
-            <input type="range" id="llm-timeout-slider"
-              min="60" max="900" step="30" value="300"
-              style="width:100%;accent-color:var(--accent);cursor:pointer;height:6px"/>
-            <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-              <span>60s</span><span>5 min</span><span>15 min</span>
-            </div>
-            <p style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-              <code>LLM_TIMEOUT</code> — hard timeout per request. Increase for very large clusters or complex multi-tool queries. A <em>Still processing…</em> heartbeat appears every 15s while waiting.
-            </p>
-          </div>
-
-        </div>
-        <div id="output-status" class="stab-status"></div>
-        <div class="modal-btns">
-          <button class="modal-btn modal-btn-cancel" id="output-cancel">Close</button>
-          <button class="modal-btn modal-btn-primary" id="output-apply">Apply</button>
-        </div>
-      </div>
-
-      <!-- ── Tab: Security ── -->
-      <div class="stab-pane" id="tab-security">
-        <div style="border-left:3px solid #f59e0b;color:var(--textMain);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px 10px;background:var(--tooltipBg);border-radius:0 4px 4px 0;margin-bottom:14px">
-          ⚠️ <strong style="color:#f59e0b">Warning:</strong>
-          Enabling this option will show decoded secret values — including passwords, tokens, and certificates — directly in the chat. Only enable in a secure, private session.
-        </div>
-        <div style="display:flex;flex-direction:column;gap:18px;padding:4px 0">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-            <div>
-              <div style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;margin-bottom:4px">SHOW SECRET VALUES</div>
-              <div style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace">
-                When enabled, K8s secret data (passwords, tokens, certs) are base64-decoded and shown in responses. Default: off.
-              </div>
-            </div>
-            <!-- Toggle switch -->
-            <label id="secret-toggle-label" style="position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;cursor:pointer">
-              <input type="checkbox" id="secret-decode-toggle" style="opacity:0;width:0;height:0">
-              <span id="secret-toggle-track" style="position:absolute;inset:0;background:var(--border);border-radius:24px;transition:background .2s"></span>
-              <span id="secret-toggle-thumb" style="position:absolute;left:3px;top:3px;width:18px;height:18px;background:#fff;border-radius:50%;transition:transform .2s;box-shadow:0 1px 3px #0006"></span>
-            </label>
-          </div>
-          <div id="secret-toggle-status" style="font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);min-height:16px">
-            🔒 Secret values are hidden (safe mode)
-          </div>
-        </div>
-        <div class="modal-btns" style="margin-top:auto">
-          <button class="modal-btn modal-btn-cancel" id="security-cancel">Close</button>
-        </div>
-      </div>
-
-    </div>
-  </div>
 
 </div><!-- #app -->
 
@@ -1104,11 +1205,158 @@ document.querySelectorAll('.mtab').forEach(btn => {
   btn.addEventListener('click', function() {
     const target = this.dataset.pane;
     document.querySelectorAll('.mtab').forEach(b => b.classList.toggle('active', b.dataset.pane === target));
-    document.getElementById('chat-pane').style.display       = (target === 'chat-pane')       ? 'flex'  : 'none';
-    document.getElementById('readme-pane').style.display     = (target === 'readme-pane')     ? 'block' : 'none';
-    document.getElementById('guidelines-pane').style.display = (target === 'guidelines-pane') ? 'block' : 'none';
+    document.getElementById('chat-pane').style.display         = (target === 'chat-pane')       ? 'flex'  : 'none';
+    document.getElementById('kb-bot-pane').classList.toggle('active', target === 'kb-bot-pane');
+    document.getElementById('readme-pane').style.display       = (target === 'readme-pane')     ? 'block' : 'none';
+    document.getElementById('settings-pane').classList.toggle('active', target === 'settings-pane');
+    document.getElementById('guidelines-pane').style.display   = (target === 'guidelines-pane') ? 'block' : 'none';
+    if(target === 'settings-pane') { loadRagStats(); loadIngestedFiles(); loadOutputConfig(); }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ECS KNOWLEDGE BOT
+// ═══════════════════════════════════════════════════════════════════════════
+(function(){
+  const body      = document.getElementById('kb-bot-body');
+  const input     = document.getElementById('kb-bot-input');
+  const sendBtn   = document.getElementById('kb-bot-send');
+  const topkSlider = document.getElementById('kb-topk-slider');
+  const topkVal    = document.getElementById('kb-topk-val');
+  let   activeSheet = '';
+
+  // Results limit slider
+  topkSlider.addEventListener('input', () => {
+    topkVal.textContent = topkSlider.value;
+  });
+
+  // Sheet filter pills
+  document.querySelectorAll('.kb-sf-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.kb-sf-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeSheet = btn.dataset.sheet;
+    });
+  });
+
+  // Send on Enter (Shift+Enter = newline)
+  input.addEventListener('keydown', e => {
+    if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); askKb(); }
+  });
+  sendBtn.addEventListener('click', askKb);
+
+  async function askKb(){
+    const q = input.value.trim();
+    if(!q) return;
+    input.value = '';
+    sendBtn.disabled = true;
+
+    const topK = parseInt(topkSlider.value, 10) || 50;
+
+    // Spinner
+    const spinner = document.createElement('div');
+    spinner.className = 'kb-spinner';
+    spinner.innerHTML = '&#128218; Searching knowledge base <span>.</span><span>.</span><span>.</span>';
+    body.appendChild(spinner);
+    body.scrollTop = body.scrollHeight;
+
+    try {
+      const params = new URLSearchParams({ query: q, top_k: topK });
+      if(activeSheet) params.append('sheet', activeSheet);
+      const res  = await fetch('/api/rag/query?' + params.toString());
+      const data = await res.json();
+      spinner.remove();
+      renderAnswer(q, topK, data.answer || data.context || '(No results found)');
+    } catch(err) {
+      spinner.remove();
+      renderAnswer(q, '⚠️ Error: ' + err.message);
+    } finally {
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  function renderAnswer(question, topK, raw){
+    const block = document.createElement('div');
+    block.className = 'kb-answer-block';
+
+    const qDiv = document.createElement('div');
+    qDiv.className = 'kb-answer-q';
+    const sheetTag = activeSheet ? `  [${activeSheet}]` : '';
+    qDiv.textContent = `❓ ${question}${sheetTag}  · top_k=${topK}`;
+    block.appendChild(qDiv);
+
+    const ansDiv = document.createElement('div');
+    ansDiv.className = 'kb-answer-body';
+    ansDiv.innerHTML = formatKbAnswer(raw);
+    block.appendChild(ansDiv);
+
+    // Copy button
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'kb-copy-btn';
+    copyBtn.textContent = '⎘ Copy answer';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(raw).then(() => {
+        copyBtn.textContent = '✓ Copied!';
+        setTimeout(() => copyBtn.textContent = '⎘ Copy answer', 2000);
+      });
+    });
+    block.appendChild(copyBtn);
+
+    body.appendChild(block);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  // Convert raw RAG text to HTML — renders markdown-style tables and bold/code
+  function formatKbAnswer(text){
+    // Escape HTML first
+    let t = text
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    // Bold **text**
+    t = t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    // Inline code `text`
+    t = t.replace(/`([^`]+)`/g, '<code style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;background:var(--inputBg);border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--accent2)">$1</code>');
+
+    // Markdown table detection: lines that contain | separators
+    const lines = t.split('\n');
+    const out = [];
+    let inTable = false, tableLines = [];
+
+    function flushTable(){
+      if(!tableLines.length){ inTable = false; return; }
+      // First line = header, second line = separator (---), rest = rows
+      const rows = tableLines.filter(l => !/^\|[-| :]+\|$/.test(l.trim()));
+      let html = '<table>';
+      rows.forEach((row, i) => {
+        const cells = row.split('|').slice(1,-1);
+        if(i === 0){
+          html += '<tr>' + cells.map(c => `<th>${c.trim()}</th>`).join('') + '</tr>';
+        } else {
+          html += '<tr>' + cells.map(c => `<td>${c.trim()}</td>`).join('') + '</tr>';
+        }
+      });
+      html += '</table>';
+      out.push(html);
+      tableLines = [];
+      inTable = false;
+    }
+
+    for(const line of lines){
+      if(/^\|.+\|$/.test(line.trim())){
+        inTable = true;
+        tableLines.push(line.trim());
+      } else {
+        if(inTable) flushTable();
+        out.push(line);
+      }
+    }
+    if(inTable) flushTable();
+
+    return out.join('\n');
+  }
+})();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // THEMES
@@ -1184,16 +1432,21 @@ document.querySelectorAll('.tdot').forEach(btn=>{
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SETTINGS MODAL — tabbed: Kubeconfig | RAG Documents
+// SETTINGS PANE — inline tab, vertical nav
 // ═══════════════════════════════════════════════════════════════════════════
-const settingsBtn     = document.getElementById('settings-btn');
-const settingsOverlay = document.getElementById('settings-overlay');
-const clusterHostEl   = document.getElementById('cluster-host');
+const clusterHostEl = document.getElementById('cluster-host');
 
 function openSettings(tab){
-  settingsOverlay.classList.add('open');
+  // Switch to the settings main tab
+  document.querySelectorAll('.mtab').forEach(b => b.classList.toggle('active', b.dataset.pane === 'settings-pane'));
+  document.getElementById('chat-pane').style.display         = 'none';
+  document.getElementById('kb-bot-pane').classList.remove('active');
+  document.getElementById('readme-pane').style.display       = 'none';
+  document.getElementById('guidelines-pane').style.display   = 'none';
+  document.getElementById('settings-pane').classList.add('active');
   if(tab) switchTab(tab);
   if(tab === 'tab-kb') { loadRagStats(); loadIngestedFiles(); }
+  if(tab === 'tab-output') loadOutputConfig();
 }
 
 function switchTab(tabId){
@@ -1204,17 +1457,16 @@ function switchTab(tabId){
 document.querySelectorAll('.stab').forEach(btn => {
   btn.onclick = () => {
     switchTab(btn.dataset.tab);
-    if(btn.dataset.tab === 'tab-kb') { loadRagStats(); loadIngestedFiles(); }
+    if(btn.dataset.tab === 'tab-kb')     { loadRagStats(); loadIngestedFiles(); }
     if(btn.dataset.tab === 'tab-output') loadOutputConfig();
   };
 });
 
-settingsBtn.onclick = () => openSettings('tab-cluster');
-document.getElementById('settings-cancel').onclick = () => settingsOverlay.classList.remove('open');
-document.getElementById('kb-cancel').onclick        = () => settingsOverlay.classList.remove('open');
-document.getElementById('output-cancel').onclick    = () => settingsOverlay.classList.remove('open');
-document.getElementById('security-cancel').onclick  = () => settingsOverlay.classList.remove('open');
-settingsOverlay.onclick = (e) => { if(e.target === settingsOverlay) settingsOverlay.classList.remove('open'); };
+// Close buttons are hidden (display:none in CSS) but keep handlers safe
+['settings-cancel','kb-cancel','output-cancel','security-cancel'].forEach(id => {
+  const el = document.getElementById(id);
+  if(el) el.onclick = () => {};
+});
 
 // ── Security toggle ───────────────────────────────────────────────────────────
 // Persisted in localStorage so it survives page refreshes.
@@ -1307,7 +1559,6 @@ document.getElementById('output-apply').onclick = async () => {
     if(res.ok && data.ok){
       outputStatus.style.color = '#22c55e';
       outputStatus.textContent = `✓ Input: ${charsVal.toLocaleString()} chars · Output: ${tokensVal.toLocaleString()} tokens · Timeout: ${timeoutVal}s`;
-      setTimeout(() => settingsOverlay.classList.remove('open'), 1400);
     } else {
       outputStatus.style.color = '#ef4444';
       outputStatus.textContent = '✗ ' + (data.error || 'Failed to update config.');
@@ -1343,7 +1594,6 @@ document.getElementById('settings-apply').onclick = async () => {
       const ecsNode = document.getElementById('ecs-node');
       if(ecsNode) ecsNode.textContent = '· ECS: ' + label;
       kubeStatus.style.color='#22c55e'; kubeStatus.textContent='✓ Connected: ' + label;
-      setTimeout(()=> settingsOverlay.classList.remove('open'), 1200);
     } else {
       kubeStatus.style.color='#ef4444'; kubeStatus.textContent='✗ ' + (data.error||'Failed to apply kubeconfig.');
     }
@@ -1510,6 +1760,15 @@ async function fetchHealth(retries){
     const d = await r.json();
     modelName = d.model || 'unknown';
     isGpu     = (d.num_gpu || 0) > 0;
+
+    // Show model name below inference badge
+    const inferModelEl = document.getElementById('infer-model-name');
+    if(inferModelEl){
+      // Show just the last path component (e.g. "Qwen3-8B" from "/models/Qwen/Qwen3-8B")
+      const shortName = (modelName || '—').split('/').pop().split('\\').pop();
+      inferModelEl.textContent = shortName;
+      inferModelEl.title = modelName; // full path on hover
+    }
 
     const rdot = document.getElementById('rdot');
     const rtxt = document.getElementById('rtxt');

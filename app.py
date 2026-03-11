@@ -540,16 +540,38 @@ def ingest_directory(docs_dir: str, force: bool = False) -> list:
     return results
 
 
-def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None) -> str:
+def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
+                 sheet: Optional[str] = None) -> str:
     """
     Unified semantic retrieval across both LanceDB tables.
 
     Searches excel_issues first (column-aware, unresolved issues surfaced first),
     then the docs table (prose chunks).  Returns a single formatted context
     string combining both, ready for the LLM synthesis step.
+
+    sheet: optional filter to restrict Excel results to a specific sheet.
+           Valid values: "Known Issues", "Dos and Donts", "Prerequisites", "Past Learnings"
     """
     _, docs_tbl, excel_tbl = _get_lancedb()
     sections = []
+
+    # Normalise sheet name — accept common shorthands
+    _SHEET_ALIASES = {
+        "dos":          "Dos and Donts",
+        "donts":        "Dos and Donts",
+        "dos and donts": "Dos and Donts",
+        "dos & donts":  "Dos and Donts",
+        "known issues": "Known Issues",
+        "known":        "Known Issues",
+        "issues":       "Known Issues",
+        "prerequisites": "Prerequisites",
+        "prereq":       "Prerequisites",
+        "past learnings": "Past Learnings",
+        "learnings":    "Past Learnings",
+        "past":         "Past Learnings",
+    }
+    if sheet:
+        sheet = _SHEET_ALIASES.get(sheet.lower().strip(), sheet)
 
     # ── 1. Excel structured knowledge base ───────────────────────────────────
     try:
@@ -560,29 +582,29 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None)
     if excel_count > 0:
         try:
             qvec = embed_text(query)
+            sheet_filter = f"sheet = '{sheet}'" if sheet else None
+
             # Try unresolved-first, fall back to all results
             try:
-                unresolved = (
-                    excel_tbl.search(qvec, vector_column_name="vector")
-                    .where("present = 'Yes'")
-                    .limit(top_k)
-                    .to_list()
-                )
+                _uq = excel_tbl.search(qvec, vector_column_name="vector").where("present = 'Yes'")
+                if sheet_filter:
+                    _uq = _uq.where(sheet_filter)
+                unresolved = _uq.limit(top_k).to_list()
             except Exception:
                 unresolved = []
 
-            all_hits = (
-                excel_tbl.search(qvec, vector_column_name="vector")
-                .limit(top_k)
-                .to_list()
-            )
+            _aq = excel_tbl.search(qvec, vector_column_name="vector")
+            if sheet_filter:
+                _aq = _aq.where(sheet_filter)
+            all_hits = _aq.limit(top_k).to_list()
 
             seen, merged = set(), []
             for r in (unresolved + all_hits):
                 if r["id"] not in seen:
                     seen.add(r["id"])
                     merged.append(r)
-            merged = merged[:top_k]
+            # No re-cap here — top_k already applied per search query above.
+            # Unresolved results are prepended so they surface first.
 
             if merged:
                 lines = [f"📋 Knowledge Base ({len(merged)} match(es)):\n"]
@@ -697,17 +719,26 @@ RAG_TOOLS = {
             "ALWAYS call this after describe_pod when a pod is unhealthy, crashing, OOMKilled, "
             "CrashLoopBackOff, Pending, or not Ready — to check whether a known fix is documented. "
             "Use the specific error or component name as the query. "
+            "When the user explicitly asks for a specific sheet (dos and donts, known issues, "
+            "prerequisites, past learnings), pass the sheet parameter to filter results to that sheet only. "
             "Examples: "
             "rag_search(query='CrashLoopBackOff cdp-cadence') "
             "rag_search(query='OOMKilled sense-db memory limit') "
-            "rag_search(query='pod pending PVC not bound') "
-            "rag_search(query='ImagePullBackOff air-gapped') "
+            "rag_search(query='dos and donts ecs cluster', sheet='Dos and Donts') "
+            "rag_search(query='longhorn storage issues', sheet='Known Issues') "
+            "rag_search(query='prerequisites before deploy', sheet='Prerequisites') "
         ),
         "parameters": {
-            "query": {"type": "string",
-                      "description": "Search query — use specific error names, component names, or symptoms."},
-            "top_k": {"type": "integer", "default": 5},
-            "doc_type": {"type": "string", "default": None},
+            "query":    {"type": "string",
+                         "description": "Search query — use specific error names, component names, or symptoms."},
+            "top_k":    {"type": "integer", "default": 10},
+            "doc_type": {"type": "string",  "default": None},
+            "sheet":    {"type": "string",  "default": None,
+                         "description": (
+                             "Optional sheet filter. Valid values: "
+                             "'Known Issues', 'Dos and Donts', 'Prerequisites', 'Past Learnings'. "
+                             "Use when the user explicitly asks for a specific category."
+                         )},
         },
     },
 }
@@ -1034,8 +1065,9 @@ def build_agent():
         is_comparison_query = any(k in _oq for k in _COMPARISON_KEYWORDS)
 
         parts = []
+        _tool_char_limit = 40000
         for i, tr in enumerate(tool_results, 1):
-            body = tr.content if len(tr.content) <= 40000 else tr.content[:40000] + "\n...[truncated]"
+            body = tr.content if len(tr.content) <= _tool_char_limit else tr.content[:_tool_char_limit] + "\n...[truncated]"
             parts.append(f"--- TOOL RESULT {i} ---\n{body}\n")
         combined = "".join(parts)
 
@@ -1217,7 +1249,7 @@ def build_agent():
         if not has_tool_results:
             _max_new = 512
         else:
-            _max_new = max(512, min(_MAX_NEW_TOKENS, 1024) if NUM_GPU == 0 else _MAX_NEW_TOKENS)
+            _max_new = max(512, _MAX_NEW_TOKENS)
         _log_ag.debug(f"[llm_node itr={itr}] max_new_tokens={_max_new}")
 
         # ── GGUF path (tokenizer is None) ─────────────────────────────────────
@@ -1264,6 +1296,31 @@ def build_agent():
                          else encoded).to(model.device)
             input_len = input_ids.shape[-1]
             _log_ag.debug(f"[llm_node itr={itr}] input tokens={input_len}")
+
+            # ── Context window guard ──────────────────────────────────────────
+            # If input + output budget would exceed the model's context window,
+            # trim the input by dropping tokens from the middle of the tool
+            # results (preserving the system prompt head and synthesis tail).
+            model_max = getattr(tokenizer, "model_max_length", None) or 32768
+            # model_max_length is sometimes set to absurd values (e.g. 1e30) by
+            # HF configs — cap to a sane value.
+            if model_max > 131072:
+                model_max = 32768
+            budget = model_max - _max_new - 64   # 64 token safety margin
+            if input_len > budget:
+                overflow = input_len - budget
+                keep_head = budget // 2
+                keep_tail = budget - keep_head
+                trimmed = torch.cat([
+                    input_ids[:, :keep_head],
+                    input_ids[:, -keep_tail:]
+                ], dim=1)
+                _log_ag.warning(
+                    f"[llm_node itr={itr}] input {input_len} tokens exceeds ctx budget {budget} "
+                    f"— trimmed {overflow} tokens from middle"
+                )
+                input_ids = trimmed
+                input_len  = input_ids.shape[-1]
 
             with torch.no_grad():
                 output_ids = model.generate(
@@ -2033,6 +2090,8 @@ async def api_index():
             {"method": "GET",  "path": "/api/pvcs",           "description": "PVC / storage status  (optional: ?ns=X)"},
             {"method": "GET",  "path": "/api/namespaces",     "description": "All namespaces and their status"},
             {"method": "GET",  "path": "/api/rag/stats",      "description": "LanceDB document and Excel row statistics"},
+            {"method": "GET",  "path": "/api/rag/files",      "description": "List all previously ingested filenames"},
+            {"method": "GET",  "path": "/api/rag/query",      "description": "RAG-only query for Knowledge Bot (no LLM, no truncation)"},
             {"method": "GET",  "path": "/api/system",         "description": "Live CPU / RAM / GPU metrics"},
         ],
     }
@@ -2275,6 +2334,26 @@ async def api_rag_files():
             pass
 
         return {"total": len(files), "files": files}
+    except Exception as e:
+        return _JSONResponse(status_code=500, content={"error": str(e)})
+
+@api.get("/rag/query", summary="RAG-only query — no LLM synthesis, returns full untruncated context")
+async def api_rag_query(query: str, top_k: int = 50, sheet: Optional[str] = None):
+    """
+    Used by the ECS Knowledge Bot tab. top_k controls how many rows are retrieved
+    per search pass (unresolved + all). Range: 10–500. Default: 50.
+    Results are not re-capped after dedup, so effective output can be up to 2×top_k.
+
+    curl -s "http://localhost:8000/api/rag/query?query=longhorn+pvc+stuck&top_k=100&sheet=Known+Issues"
+    """
+    if not query.strip():
+        return {"answer": "", "context": ""}
+    top_k = max(10, min(top_k, 500))   # hard clamp: 10–500
+    try:
+        context = rag_retrieve(query=query, top_k=top_k, sheet=sheet)
+        if not context.strip():
+            context = "No matching entries found in the knowledge base for this query."
+        return {"answer": context, "query": query, "sheet": sheet or "all"}
     except Exception as e:
         return _JSONResponse(status_code=500, content={"error": str(e)})
 

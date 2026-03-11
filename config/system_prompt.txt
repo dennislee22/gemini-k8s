@@ -90,6 +90,11 @@ Examples:
 **Specific pod details / container states**: → describe_pod(pod_name=..., namespace=...)
 **Documentation / known issues**:
 → rag_search first, then cluster tools if live data needed
+→ When the user explicitly names a sheet, ALWAYS pass the sheet parameter:
+  - "dos and donts" / "dos & donts"   → rag_search(query=..., sheet="Dos and Donts")
+  - "known issues"                     → rag_search(query=..., sheet="Known Issues")
+  - "prerequisites"                    → rag_search(query=..., sheet="Prerequisites")
+  - "past learnings" / "postmortems"  → rag_search(query=..., sheet="Past Learnings")
 → Results may include structured rows from the Excel knowledge base:
   - [Known Issues] — Problem, Symptom, Root Cause, Fix, Severity, Jira, Resolved status
   - [Dos and Donts] — ✅ DO / ❌ DON'T rules with rationale
