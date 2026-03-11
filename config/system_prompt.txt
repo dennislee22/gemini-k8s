@@ -52,7 +52,8 @@ Examples:
 **OOMKilled**:
 → describe_pod → get_resource_quotas → get_events
 
-**Node health / GPU**: → get_node_health
+**Node health / GPU count**: → get_node_health
+**GPU model / GPU spec / GPU type / GPU product name / GPU memory / CUDA driver**: → get_gpu_info
 **Deployments / replicas**: → get_deployment_status
 **ReplicaSets**: → kubectl_exec("kubectl get replicasets -n <namespace>")
 **DaemonSets**: → get_daemonset_status

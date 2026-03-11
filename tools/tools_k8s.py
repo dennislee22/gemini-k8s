@@ -469,7 +469,80 @@ def get_node_health() -> str:
         return f"K8s API error: {e.reason}"
 
 
-_EVENT_NOISE_PATTERNS = [
+def get_gpu_info() -> str:
+    """Return detailed GPU model/spec info from node labels and capacity."""
+    try:
+        nodes = _core.list_node()
+        if not nodes.items:
+            return "No nodes found."
+
+        results = []
+        for node in nodes.items:
+            labels   = node.metadata.labels or {}
+            capacity = node.status.capacity or {}
+            alloc    = node.status.allocatable or {}
+
+            # Count allocatable GPUs from capacity keys
+            gpu_cap   = {}
+            gpu_alloc = {}
+            for key, val in capacity.items():
+                if "nvidia.com/gpu" in key or "amd.com/gpu" in key:
+                    gpu_cap[key] = val
+            for key, val in alloc.items():
+                if "nvidia.com/gpu" in key or "amd.com/gpu" in key:
+                    gpu_alloc[key] = val
+
+            if not gpu_cap and not any(
+                k.startswith("nvidia.com/") or k.startswith("amd.com/")
+                for k in labels
+            ):
+                continue  # no GPU on this node
+
+            info = [f"Node: {node.metadata.name}"]
+
+            # nvidia-device-plugin / gpu-feature-discovery labels
+            nvidia_label_prefixes = [
+                "nvidia.com/gpu.product",
+                "nvidia.com/gpu.memory",
+                "nvidia.com/gpu.count",
+                "nvidia.com/gpu.family",
+                "nvidia.com/gpu.machine",
+                "nvidia.com/cuda.driver.major",
+                "nvidia.com/cuda.runtime.major",
+                "feature.node.kubernetes.io/pci-10de",   # NVIDIA PCI
+                "nvidia.com/mig.strategy",
+            ]
+            for prefix in nvidia_label_prefixes:
+                for k, v in labels.items():
+                    if k == prefix or k.startswith(prefix):
+                        info.append(f"  {k}: {v}")
+
+            # AMD equivalents
+            for k, v in labels.items():
+                if k.startswith("amd.com/gpu"):
+                    info.append(f"  {k}: {v}")
+
+            # Capacity and allocatable
+            for k, v in gpu_cap.items():
+                info.append(f"  capacity[{k}]: {v}")
+            for k, v in gpu_alloc.items():
+                if k not in gpu_cap or gpu_alloc[k] != gpu_cap[k]:
+                    info.append(f"  allocatable[{k}]: {v}")
+
+            if len(info) == 1:
+                info.append("  (No detailed GPU labels found — device plugin may not be running)")
+
+            results.append("\n".join(info))
+
+        if not results:
+            return "No GPU nodes detected in the cluster."
+
+        return "\n\n".join(results)
+    except ApiException as e:
+        return f"K8s API error: {e.reason}"
+
+
+
     "cgroup",
     "cgroupv",
     "cgroup v1",
@@ -2718,7 +2791,23 @@ K8S_TOOLS: dict = {
 
     "get_node_health": {
         "fn":          get_node_health,
-        "description": "Check node health, CPU/memory/disk pressure, and allocatable resources.",
+        "description": (
+            "Check node health, CPU/memory/disk pressure, allocatable resources, and GPU count per node. "
+            "Returns GPU in-use vs allocatable counts. "
+            "For GPU MODEL/SPEC (product name, memory, driver version), use get_gpu_info instead."
+        ),
+        "parameters":  {},
+    },
+
+    "get_gpu_info": {
+        "fn":          get_gpu_info,
+        "description": (
+            "Get detailed GPU hardware specification for each node: GPU model/product name, VRAM, "
+            "CUDA driver version, GPU family, and related node labels populated by the NVIDIA device plugin "
+            "or GPU Feature Discovery (GFD). "
+            "Use this for: 'what GPU model does the cluster have', 'what GPU spec', "
+            "'what is the GPU type', 'what graphics card', 'NVIDIA model', 'GPU memory spec'."
+        ),
         "parameters":  {},
     },
 
