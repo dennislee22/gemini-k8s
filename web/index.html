@@ -708,21 +708,9 @@ button{cursor:pointer;font-family:inherit}
 
         <div class="tip">&#128161; <strong>Quick start:</strong> Type a question in the <strong>ECS AI Ops Chatbot</strong> tab — e.g. <em>"is my cluster having any issues?"</em> — and press <strong>Enter</strong>.</div>
 
-        <div class="warn">&#9888; This chatbot is <strong>read-only by default</strong> — it will never restart, delete, or modify cluster resources. Tested with Qwen3-8B. Using other self-hosted models may produce different or unexpected responses.</div>
+        <div class="warn">&#9888; This chatbot is <strong>read-only by default</strong> — it will never restart, delete, or modify cluster resources. Validated on Qwen3-8B running on GPU (HuggingFace Transformers) and Qwen3-8B-GGUF Q4_K_M running on CPU (llama-cpp-python). Using other self-hosted models may produce different or unexpected responses.</div>
 
-        <!-- ── ECS AI Ops Chatbot ──────────────────────────────────────── -->
-        <h2 style="font-size:15px;font-family:'IBM Plex Sans',sans-serif;letter-spacing:normal">ECS AI Ops Chatbot</h2>
         <p>Each query runs through an <strong>agentic ReAct loop</strong> driven by the LLM. The LLM reads a Tool Selection Guide in its system prompt, picks the right tools, observes the results, and decides whether to chain further tool calls or synthesise a final answer. Each query is treated independently — there is no conversation history.</p>
-        <p>Example queries:</p>
-        <ul>
-          <li>is my cluster having any issues?</li>
-          <li>list all pods in cdp namespace</li>
-          <li>what is the cpu and memory request for cdp-embedded-db pod in cdp namespace?</li>
-          <li>calculate CPU requests for all pods in longhorn-system namespace</li>
-          <li>list all RWO pvc in cdp namespace</li>
-          <li>which node has a GPU available and in use?</li>
-          <li>show all warning events in cdp namespace</li>
-        </ul>
 
         <!-- ── ECS Knowledge Bot ──────────────────────────────────────── -->
         <h2 style="font-size:15px;font-family:'IBM Plex Sans',sans-serif;letter-spacing:normal">&#128218; ECS Knowledge Bot</h2>
@@ -736,13 +724,6 @@ button{cursor:pointer;font-family:inherit}
           <tr><td>Best for</td><td>Operational queries, health checks, diagnostics</td><td>Reference lookups, runbooks, SOPs</td></tr>
         </table>
         <p>Adjust the <strong>Max results</strong> slider if answers appear incomplete — increasing it retrieves more knowledge base entries per query.</p>
-        <p>Example queries:</p>
-        <ul>
-          <li>what are the known issues with longhorn storage?</li>
-          <li>what are the dos and don'ts for ECS cluster maintenance?</li>
-          <li>what are the prerequisites before upgrading ECS?</li>
-          <li>what past incidents involved PVC stuck in terminating state?</li>
-        </ul>
 
         <!-- ── Configuring the Cluster ─────────────────────────────────── -->
         <h2>Configuring the Cluster</h2>
@@ -785,7 +766,7 @@ python3 app.py --ingest ./docs --force   # force overwrite all</code></pre>
         <table>
           <tr><th>Hardware</th><th>Model</th><th>Backend</th><th>Response time</th></tr>
           <tr><td><strong>GPU</strong> (recommended)</td><td><a href="https://huggingface.co/Qwen/Qwen3-8B" target="_blank">Qwen3-8B</a></td><td>HuggingFace Transformers (bfloat16)</td><td>10–30 s</td></tr>
-          <tr><td><strong>CPU only</strong></td><td><a href="https://huggingface.co/Qwen/Qwen3-8B-GGUF" target="_blank">Qwen3-8B-GGUF Q4_K_M</a></td><td>llama-cpp-python (quantised)</td><td>Several minutes</td></tr>
+          <tr><td><strong>CPU only</strong></td><td><a href="https://huggingface.co/Qwen/Qwen3-8B-GGUF" target="_blank">Qwen3-8B-GGUF Q4_K_M</a></td><td>llama-cpp-python (quantized)</td><td>Several minutes</td></tr>
         </table>
         <p>Set <code>LLM_MODEL</code> in the <code>env</code> file. If the path ends with <code>.gguf</code> the app automatically switches to the GGUF backend — no other config change needed.</p>
         <pre><code># GPU
