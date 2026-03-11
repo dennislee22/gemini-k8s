@@ -211,7 +211,7 @@ button{cursor:pointer;font-family:inherit}
 }
 .mtab{
   padding:9px 16px;font-size:12px;font-weight:600;
-  font-family:'IBM Plex Mono',monospace;color:var(--dimText);
+  font-family:'IBM Plex Mono',monospace;color:#ffffff;
   border:none;background:none;cursor:pointer;
   border-bottom:2px solid transparent;margin-bottom:-1px;
   transition:color .15s,border-color .15s;
@@ -395,7 +395,7 @@ button{cursor:pointer;font-family:inherit}
   border-radius:0 8px 8px 0;padding:10px 14px;margin:10px 0 16px;
   font-size:13px;
 }
-#ex-label{font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;letter-spacing:.1em}
+#ex-label{font-size:11px;color:#ffffff;font-family:'IBM Plex Mono',monospace;letter-spacing:.1em}
 #ex-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
 .ex-btn{
   background:var(--headerBg);border:1px solid var(--border);
@@ -652,7 +652,7 @@ button{cursor:pointer;font-family:inherit}
         <button class="mtab" data-pane="kb-bot-pane">&#128218; ECS Knowledge Bot</button>
         <button class="mtab" data-pane="settings-pane">&#9881; Settings</button>
         <button class="mtab" data-pane="readme-pane">&#128214; README</button>
-        <button class="mtab" data-pane="guidelines-pane">&#128203; Prompt Guidelines</button>
+        <button class="mtab" data-pane="guidelines-pane">&#128203; Prompt Guidelines for ECS AI Ops Chatbot</button>
       </div>
 
       <!-- ── Chat pane ─────────────────────────────────────────────────── -->
@@ -679,7 +679,6 @@ button{cursor:pointer;font-family:inherit}
           <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
             <div>
               <h2>&#128218; ECS Knowledge Bot</h2>
-              <p>RAG-only answers from your ingested runbooks, known issues, and SOPs &mdash; no live cluster data.</p>
             </div>
             <!-- Results limit control -->
             <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;font-family:'IBM Plex Mono',monospace">
@@ -722,6 +721,20 @@ button{cursor:pointer;font-family:inherit}
         <!-- ── How it works ───────────────────────────────────────────── -->
         <h2>How it works</h2>
         <p>Each query runs through an <strong>agentic ReAct loop</strong> driven by the LLM — not by hardcoded rules. The LLM reads a Tool Selection Guide in its system prompt, picks the right tools, observes the results, and decides whether to call more tools or synthesise a final answer.</p>
+
+        <!-- ── ECS Knowledge Bot ──────────────────────────────────────── -->
+        <h2>&#128218; ECS Knowledge Bot</h2>
+        <p>The <strong>ECS Knowledge Bot</strong> tab is a dedicated RAG-only interface — it queries your ingested knowledge base directly without involving the LLM or making any live cluster calls. It is best used for looking up runbooks, known issues, dos &amp; don'ts, prerequisites, and past learnings from your uploaded documents.</p>
+        <p>Key differences from the ECS AI Ops Chatbot:</p>
+        <table>
+          <tr><th></th><th>ECS AI Ops Chatbot</th><th>ECS Knowledge Bot</th></tr>
+          <tr><td>Live cluster data</td><td>✅ Yes — calls kubectl, Longhorn, events tools</td><td>❌ No</td></tr>
+          <tr><td>Knowledge base (RAG)</td><td>✅ Yes — consulted alongside live data</td><td>✅ Yes — only source</td></tr>
+          <tr><td>LLM synthesis</td><td>✅ Yes — ReAct agent loop</td><td>❌ No — raw retrieval</td></tr>
+          <tr><td>Response speed</td><td>Slower (LLM inference)</td><td>Instant</td></tr>
+          <tr><td>Best for</td><td>Operational queries, health checks, diagnostics</td><td>Reference lookups, runbooks, SOPs</td></tr>
+        </table>
+        <p>Use the <strong>Filter</strong> pills to restrict results to a specific sheet (Known Issues, Dos &amp; Don'ts, Prerequisites, Past Learnings), and adjust the <strong>Max results</strong> slider if answers appear incomplete — increasing it retrieves more knowledge base entries per query.</p>
 
         <!-- ── Configuring the Cluster ─────────────────────────────────── -->
         <h2>Configuring the Cluster</h2>
@@ -835,7 +848,7 @@ python3 app.py --ingest ./docs --force   # force overwrite all</code></pre>
       <!-- ── Prompt Guidelines pane ──────────────────────────────────── -->
       <div id="guidelines-pane">
 
-        <h1>&#128203; Prompt Guidelines</h1>
+        <h1>&#128203; Prompt Guidelines for ECS AI Ops Chatbot</h1>
         <p>Tips and examples for getting the best responses from the ECS AI Ops Chatbot.</p>
 
         <div class="tip">&#128274; <strong>Non-intrusive:</strong> All live cluster queries are read-only — only GET operations are executed, never write or delete. Your cluster is safe.</div>
@@ -1230,13 +1243,13 @@ document.querySelectorAll('.mtab').forEach(btn => {
     topkVal.textContent = topkSlider.value;
   });
 
-  // Sheet filter pills
-  document.querySelectorAll('.kb-sf-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.kb-sf-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      activeSheet = btn.dataset.sheet;
-    });
+  // Sheet filter pills — use event delegation to guarantee capture
+  document.querySelector('.kb-sheet-filter').addEventListener('click', e => {
+    const btn = e.target.closest('.kb-sf-btn');
+    if(!btn) return;
+    document.querySelectorAll('.kb-sf-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeSheet = btn.dataset.sheet;
   });
 
   // Send on Enter (Shift+Enter = newline)
@@ -1269,7 +1282,7 @@ document.querySelectorAll('.mtab').forEach(btn => {
       renderAnswer(q, topK, data.answer || data.context || '(No results found)');
     } catch(err) {
       spinner.remove();
-      renderAnswer(q, '⚠️ Error: ' + err.message);
+      renderAnswer(q, topK, '⚠️ Error: ' + err.message);
     } finally {
       sendBtn.disabled = false;
       input.focus();

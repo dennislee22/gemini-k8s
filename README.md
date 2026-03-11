@@ -14,7 +14,7 @@ And, it's **air-gapped friendly** — no cloud LLM APIs, suitable for secured an
 
 This ECS AI Ops Chatbot is powered by:
 
-- 🤖 **Self-hosted local LLM** — Qwen3-8B running entirely on-premise via HuggingFace Transformers, with no external API calls or internet dependency. Qwen3-8B is chosen because it strikes the right balance; lightweight enough to run on modest hardware, yet capable enough to avoid the hallucination issues common in smaller models. It also has strong native tool-calling capability, which is essential for reliably driving the agentic loop.
+- 🤖 **Self-hosted local LLM** — runs entirely on-premise with no external API calls or internet dependency. Use **[Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)** (HuggingFace Transformers) on GPU, or **[Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF) Q4_K_M** (llama-cpp-python) on CPU. Qwen3-8B is chosen for its strong native tool-calling capability — essential for reliably driving the agentic loop — and its balance of size and reasoning quality.
 - 🔁 **LangGraph agentic loop** — a ReAct agent that autonomously selects the right Kubernetes tools, executes them, observes the results, and chains further calls when needed before synthesising a final answer
 - 📚 **LanceDB RAG** — cross-references live cluster data against your own runbooks, known-issue docs, and SOPs ingested locally into a LanceDB vector store
 
@@ -91,7 +91,7 @@ This ECS AI Ops Chatbot is powered by:
 
 | Layer | Technology | Notes |
 |---|---|---|
-| LLM | HuggingFace Transformers | `Qwen/Qwen3-8B` — excellent tool-calling, works on CPU and GPU |
+| LLM | HuggingFace Transformers / llama-cpp-python | **GPU:** [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) · **CPU:** [Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF) Q4_K_M |
 | Agent | LangGraph | ReAct loop: LLM selects tools → executes → observes → repeats or answers |
 | Embeddings | SentenceTransformers | `nomic-ai/nomic-embed-text-v1.5` (local) |
 | Vector DB | LanceDB (embedded) | Two tables: `docs` (prose chunks) + `excel_issues` (structured Excel rows) |
@@ -143,19 +143,24 @@ This ECS AI Ops Chatbot is powered by:
 - Download the LLM and embedding models before starting:
 
 ```bash
-# Qwen3-8B LLM
+# ── GPU: full-precision Qwen3-8B (HuggingFace Transformers) ──────────────────
+# https://huggingface.co/Qwen/Qwen3-8B
 git clone https://huggingface.co/Qwen/Qwen3-8B /models/Qwen3-8B
 
-# SentenceTransformers embedding model
+# ── CPU: quantised GGUF variant (llama-cpp-python) ───────────────────────────
+# https://huggingface.co/Qwen/Qwen3-8B-GGUF  (Q4_K_M recommended for CPU)
+git clone https://huggingface.co/Qwen/Qwen3-8B-GGUF /models/Qwen3-8B-GGUF
+
+# SentenceTransformers embedding model (required for both GPU and CPU)
 git clone https://huggingface.co/nomic-ai/nomic-embed-text-v1.5 /models/nomic-embed-text-v1.5
 ```
 
-**GPU vs CPU:**
+**GPU vs CPU — recommended models:**
 
 The application automatically detects available GPUs at startup and uses them if present. If no GPU is found, it falls back to CPU inference without any manual configuration.
 
-- **GPU (recommended)** — responses typically complete in **10–30 seconds**. Requires an NVIDIA GPU with at least 20 GB VRAM (e.g. A100, A30, RTX 3090/4090).
-- **CPU only** — the model loads into system RAM and inference takes **several minutes per query**. Usable for testing or low-frequency queries, but not practical for interactive use.
+- **GPU (recommended)** — use **[Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)** (full-precision, HuggingFace Transformers). Responses typically complete in **10–30 seconds**. Requires an NVIDIA GPU with at least 20 GB VRAM (e.g. A100, A30, RTX 3090/4090).
+- **CPU only** — use **[Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF)**, specifically the **Q4_K_M** quantisation, via `llama-cpp-python`. This reduces memory footprint significantly and is the only practical option for CPU inference. Responses take **several minutes per query** — acceptable for testing or low-frequency use.
 
 ### 1. Install dependencies
 
@@ -170,11 +175,12 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 ### 2. Configure environment
 
-Create an `env` file next to `app.py`:
+**GPU — `env` configuration:**
 
 ```ini
 KUBECONFIG_PATH=~/kubeconfig
 
+# Full-precision Qwen3-8B — https://huggingface.co/Qwen/Qwen3-8B
 LLM_MODEL=/models/Qwen3-8B
 EMBED_MODEL=/models/nomic-embed-text-v1.5
 
@@ -189,26 +195,38 @@ MAX_NEW_TOKENS=4096
 LLM_TIMEOUT=300
 ```
 
-**Using a GGUF model (CPU-optimised quantised inference):**
+**CPU (GGUF) — `env` configuration:**
 
-If `LLM_MODEL` ends with `.gguf` or contains `gguf` in the name, the app automatically switches to `llama-cpp-python` for inference — no GPU required.
+If `LLM_MODEL` ends with `.gguf` or contains `gguf` in the path, the app automatically switches to `llama-cpp-python` for inference — no GPU required. The **Q4_K_M** quantisation is recommended: it gives the best balance of quality and speed on CPU.
 
 ```ini
-# Path to a local GGUF file
-LLM_MODEL=/models/Qwen3-8B-Q4_K_M.gguf
+KUBECONFIG_PATH=~/kubeconfig
 
-# Or a HuggingFace repo (downloads the Q4_K_M file automatically)
-LLM_MODEL=Qwen/Qwen3-8B-GGUF
+# Qwen3-8B Q4_K_M GGUF — https://huggingface.co/Qwen/Qwen3-8B-GGUF
+LLM_MODEL=/models/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf
+EMBED_MODEL=/models/nomic-embed-text-v1.5
+
+NUM_GPU=0
+LOG_LEVEL=INFO
+LANCEDB_DIR=./lancedb
+
+KUBECTL_ALLOW_WRITES=false
+ALLOW_DB_EXEC=true
+KUBECTL_MAX_CHARS=20000
+MAX_NEW_TOKENS=4096
+LLM_TIMEOUT=900     # CPU inference is slower — allow up to 15 min
 
 # Optional GGUF tuning
-GGUF_N_CTX=8192       # context window size
-GGUF_N_THREADS=8      # CPU threads (default: all cores)
+GGUF_N_CTX=32768    # context window size
+GGUF_N_THREADS=8    # CPU threads (default: all cores)
 ```
 
-Install the GGUF backend:
+Install the GGUF backend before starting:
 ```bash
 pip install llama-cpp-python
 ```
+
+> You can also point `LLM_MODEL` at the HuggingFace repo ID (`Qwen/Qwen3-8B-GGUF`) and the app will auto-download the Q4_K_M file on first start. A local path is preferred in air-gapped environments.
 
 ### 3. Ingest documents
 
@@ -344,14 +362,15 @@ curl -s -X POST http://localhost:9000/api/config \
 
 ## Hardware Sizing
 
-| Inference | RAM | VRAM |
-|---|---|---|
-| CPU only, min. 28 cores | min. 64 GB | — |
-| GPU, **Qwen3-8B** (recommended) | 32 GB | ~20 GB |
+| Inference mode | Model | RAM | VRAM |
+|---|---|---|---|
+| GPU **(recommended)** | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 32 GB | ~20 GB |
+| CPU only | [Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF) Q4_K_M | min. 16 GB | — |
 
 > ⚠️ CPU inference takes **several minutes** to generate a response per query. A GPU is strongly recommended for practical use.
 
-Qwen3-8B in bfloat16 uses ~16–20 GB VRAM. In CPU-only mode the model loads into system RAM.
+- **GPU:** Qwen3-8B in bfloat16 requires ~16–20 GB VRAM. Tested on A100 80 GB and A30 24 GB.
+- **CPU:** Qwen3-8B-Q4_K_M (GGUF) requires ~5–6 GB RAM for the model weights. A machine with at least 28 cores and 16 GB RAM is recommended for acceptable throughput.
 
 ---
 
