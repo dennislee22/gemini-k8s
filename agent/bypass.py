@@ -37,6 +37,7 @@ BYPASSABLE_TOOLS = {
     "get_ingress_status",
     "get_secrets",
     "get_configmap_list",
+    "kubectl_exec",         # raw table/yaml output — bypass synthesis for list/show queries
 }
 
 # ── Explicit list/show intent — the ONLY time bypass is allowed ───────────────
@@ -49,8 +50,9 @@ LIST_INTENTS = (
     r"\ball pods\b", r"\ball secrets\b", r"\ball services\b",
     r"\ball namespaces\b", r"\ball nodes\b", r"\ball pvcs?\b",
     r"\ball deployments\b", r"\ball configmaps?\b",
+    r"\ball replicasets?\b", r"\ball statefulsets?\b", r"\ball daemonsets?\b",
     r"\bshow pods\b", r"\bshow secrets\b", r"\bshow services\b",
-    r"\bshow nodes\b", r"\bshow pvcs?\b",
+    r"\bshow nodes\b", r"\bshow pvcs?\b", r"\bshow replicasets?\b",
     r"\benumerate\b",
 )
 
