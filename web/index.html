@@ -1215,7 +1215,7 @@ NUM_GPU=0</code></pre>
 
 </div><!-- #app -->
 
-<script>
+<script>/* v=20260312 */
 
 (function(){
 'use strict';
@@ -1637,15 +1637,17 @@ async function loadRagStats(){
 function setFileList(files){
   pendingFiles = Array.from(files).filter(f => /\.(md|pdf|txt|xlsx|xls)$/i.test(f.name));
   const rejected = Array.from(files).length - pendingFiles.length;
-  selectedFiles.innerHTML = pendingFiles.length
-    ? pendingFiles.map(f =>
-        `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;"
-          + "background:var(--inputBg);border:1px solid var(--accent);border-radius:20px;"
-          + "font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--accent);"
-          + "box-shadow:0 0 6px var(--accent)44;white-space:nowrap;">"
-          + `<span style="color:var(--accent2)">📎</span> ${f.name}</span>`
-      ).join('') + (rejected ? ` <span style="font-size:10px;color:var(--dimText);align-self:center">(${rejected} unsupported skipped)</span>` : '')
-    : '';
+  if(pendingFiles.length){
+    const pillStyle = 'display:inline-flex;align-items:center;gap:5px;padding:3px 10px;'
+      + 'background:var(--inputBg);border:1px solid var(--accent);border-radius:20px;'
+      + 'font-size:11px;font-family:IBM Plex Mono,monospace;color:var(--accent);'
+      + 'box-shadow:0 0 6px #38bdf844;white-space:nowrap;';
+    selectedFiles.innerHTML = pendingFiles.map(f =>
+      '<span style="' + pillStyle + '">&#128206; ' + f.name + '</span>'
+    ).join('') + (rejected ? '<span style="font-size:10px;color:var(--dimText)"> (' + rejected + ' unsupported skipped)</span>' : '');
+  } else {
+    selectedFiles.innerHTML = '';
+  }
   kbIngestBtn.disabled = pendingFiles.length === 0;
   kbStatus.textContent = '';
   ingestResults.style.display = 'none';
