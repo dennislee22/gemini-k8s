@@ -2374,7 +2374,7 @@ def _llm_synthesise(context: str, question: str) -> str:
     try:
         tok, mdl, is_q3 = globals()["tokenizer"], globals()["model"], globals()["_is_qwen3"]
     except KeyError:
-        return context  # LLM not loaded yet — fall back to raw context
+        return context or ""  # LLM not loaded yet — fall back to raw context
 
     sys_prompt = (
         "You are the ECS Knowledge Bot. You answer questions strictly from the "
@@ -2437,11 +2437,11 @@ def _llm_synthesise(context: str, question: str) -> str:
         # Strip thinking tags if present
         import re as _re
         raw = _re.sub(r'<think>[\s\S]*?</think>\s*', '', raw).strip()
-        return raw or context
+        return raw or context or ""
 
     except Exception as exc:
         logger.warning(f"[_llm_synthesise] LLM call failed: {exc} — returning raw context")
-        return context
+        return context or ""
 
 
 
@@ -2498,6 +2498,7 @@ async def api_kb_ask(req: KbAskRequest):
         answer = await _asyncio.get_event_loop().run_in_executor(
             None, lambda: _llm_synthesise(rag_ctx, req.q)
         )
+        answer = answer or "I'm sorry, I was unable to generate a response. Please try rephrasing your question."
         logger.info(f"[API/kb/ask] synthesis done, answer chars={len(answer)}")
         return {"answer": answer, "query": req.q, "top_k": top_k}
 
