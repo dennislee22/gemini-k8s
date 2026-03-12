@@ -585,10 +585,12 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
             sheet_filter = f"sheet = '{sheet}'" if sheet else None
 
             # Try unresolved-first, fall back to all results
+            # NOTE: LanceDB .where() replaces the previous filter — combine into one
             try:
-                _uq = excel_tbl.search(qvec, vector_column_name="vector").where("present = 'Yes'")
+                unresolved_filter = "present = 'Yes'"
                 if sheet_filter:
-                    _uq = _uq.where(sheet_filter)
+                    unresolved_filter = f"present = 'Yes' AND {sheet_filter}"
+                _uq = excel_tbl.search(qvec, vector_column_name="vector").where(unresolved_filter)
                 unresolved = _uq.limit(top_k).to_list()
             except Exception:
                 unresolved = []
@@ -2384,14 +2386,32 @@ async def api_kb_ask(req: KbAskRequest):
     top_k = max(10, min(req.top_k, 500))
     logger.info(f"[API] POST /api/kb/ask  q={req.q!r:.120}  top_k={top_k}")
 
+    # Auto-detect sheet from query if not explicitly provided
+    sheet = req.sheet
+    if not sheet:
+        ql = req.q.lower()
+        if any(k in ql for k in ["past learning", "past incident", "postmortem",
+                                   "what went wrong", "incident", "lessons learned"]):
+            sheet = "Past Learnings"
+        elif any(k in ql for k in ["known issue", "known problem", "list issue",
+                                    "unresolved", "open issue"]):
+            sheet = "Known Issues"
+        elif any(k in ql for k in ["dos and don", "dos & don", "best practice",
+                                    "what to do", "what not to do", "donts"]):
+            sheet = "Dos and Donts"
+        elif any(k in ql for k in ["prerequisite", "prereq", "before deploy",
+                                    "before install", "what must", "required before"]):
+            sheet = "Prerequisites"
+    logger.info(f"[API/kb/ask] auto-detected sheet={sheet!r}")
+
     try:
         import asyncio as _asyncio
         context = await _asyncio.get_event_loop().run_in_executor(
-            None, lambda: rag_retrieve(query=req.q, top_k=top_k, sheet=req.sheet)
+            None, lambda: rag_retrieve(query=req.q, top_k=top_k, sheet=sheet)
         )
         logger.info(f"[API/kb/ask] RAG context chars={len(context)}")
         if not context.strip() or context == "No relevant documentation found.":
-            context = "No matching entries found in the knowledge base for this query."
+            context = "I couldn't find anything in the knowledge base matching your query.\n\nTry asking about documented topics such as:\n  • known issues (e.g. \"list all longhorn known issues\")\n  • prerequisites (e.g. \"what are the ECS prerequisites?\")\n  • dos and don'ts (e.g. \"show longhorn dos and donts\")\n  • past learnings (e.g. \"show past incident learnings\")"
         return {"answer": context, "query": req.q, "top_k": top_k}
 
     except Exception as e:

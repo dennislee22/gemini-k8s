@@ -290,7 +290,7 @@ button{cursor:pointer;font-family:inherit}
 .kb-sf-btn:hover{border-color:var(--accent);color:var(--accent2)}
 .kb-sf-btn.active{background:var(--accent)22;border-color:var(--accent);color:var(--accent2)}
 .kb-answer-block{
-  background:var(--panelBg);border:1px solid var(--accent)66;border-radius:10px;
+  background:var(--panelBg);border:2px solid var(--accent);border-radius:10px;
   padding:18px 20px;animation:fadeUp .25s ease;
 }
 .kb-answer-q{
@@ -990,7 +990,7 @@ NUM_GPU=0</code></pre>
             </div>
 
             <!-- Selected files list -->
-            <div id="selected-files" style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
+            <div id="selected-files" style="display:flex;flex-wrap:wrap;gap:6px;min-height:14px;margin-top:4px"></div>
 
             <!-- Options row -->
             <div style="display:flex;align-items:center;gap:10px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--dimText)">
@@ -1257,13 +1257,6 @@ document.querySelectorAll('.mtab').forEach(btn => {
   });
   sendBtn.addEventListener('click', askKb);
 
-  // Conversational queries the KB cannot answer — respond inline without hitting the server
-  const KB_IDENTITY = [
-    'who are you','what are you','what is this','what can you do',
-    'help','hello','hi','hey','how are you','what do you do',
-    'tell me about yourself','introduce yourself'
-  ];
-
   async function askKb(){
     const q = input.value.trim();
     if(!q) return;
@@ -1271,16 +1264,6 @@ document.querySelectorAll('.mtab').forEach(btn => {
     sendBtn.disabled = true;
 
     const topK = parseInt(topkSlider.value, 10) || 50;
-    const ql = q.toLowerCase().replace(/[?!.,]/g,'').trim();
-
-    // Short-circuit conversational queries — RAG cannot answer these
-    if(KB_IDENTITY.some(p => ql === p || ql.startsWith(p))){
-      renderAnswer(q, topK,
-        'I am the ECS Knowledge Bot. I search your ingested knowledge base — runbooks, known issues, dos & don\'ts, prerequisites, and past learnings — and return the most relevant entries.\n\nTry asking:\n  • list all known issues\n  • what are the prerequisites for ECS?\n  • show longhorn dos and donts');
-      sendBtn.disabled = false;
-      input.focus();
-      return;
-    }
 
     // Spinner
     const spinner = document.createElement('div');
@@ -1654,9 +1637,15 @@ async function loadRagStats(){
 function setFileList(files){
   pendingFiles = Array.from(files).filter(f => /\.(md|pdf|txt|xlsx|xls)$/i.test(f.name));
   const rejected = Array.from(files).length - pendingFiles.length;
-  selectedFiles.textContent = pendingFiles.length
-    ? '📎 ' + pendingFiles.map(f=>f.name).join(', ') + (rejected ? `  (${rejected} unsupported skipped)` : '')
-    : 'No valid files selected.';
+  selectedFiles.innerHTML = pendingFiles.length
+    ? pendingFiles.map(f =>
+        `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;"
+          + "background:var(--inputBg);border:1px solid var(--accent);border-radius:20px;"
+          + "font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--accent);"
+          + "box-shadow:0 0 6px var(--accent)44;white-space:nowrap;">"
+          + `<span style="color:var(--accent2)">📎</span> ${f.name}</span>`
+      ).join('') + (rejected ? ` <span style="font-size:10px;color:var(--dimText);align-self:center">(${rejected} unsupported skipped)</span>` : '')
+    : '';
   kbIngestBtn.disabled = pendingFiles.length === 0;
   kbStatus.textContent = '';
   ingestResults.style.display = 'none';
@@ -1705,7 +1694,7 @@ kbIngestBtn.onclick = async () => {
     kbStatus.style.color = err ? '#f59e0b' : '#22c55e';
     kbStatus.textContent = `✓ ${ok} ingested · ${sk} skipped · ${err} error(s) · ${data.total_chunks} new chunks`;
     pendingFiles = [];
-    selectedFiles.textContent = '';
+    selectedFiles.innerHTML = '';
     kbIngestBtn.disabled = true;
     fileInput.value = '';
     loadRagStats();
