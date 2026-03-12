@@ -409,6 +409,7 @@ button{cursor:pointer;font-family:inherit}
 .ex-btn:hover{border-color:var(--accent);color:var(--accent2)}
 
 /* Input bar */
+#chat-token-row{display:flex;align-items:center;gap:10px;padding:6px 22px 0;background:var(--headerBg);flex-shrink:0}
 #input-bar{padding:4px 22px 12px;background:var(--headerBg);display:flex;gap:10px}
 #chat-refresh-note{padding:8px 22px 4px;font-size:11.5px;color:var(--accent);background:var(--headerBg);font-weight:500;letter-spacing:.01em;border-top:1px solid var(--border)}
 #chat-input{
@@ -669,6 +670,15 @@ button{cursor:pointer;font-family:inherit}
         </div>
         <div id="chat-refresh-note">
           💡 <strong>Tip:</strong> Each question is treated independently (no conversation history). For best results, always narrow the query (e.g. <em>list all RWO pvc in <strong>cdp</strong> namespace</em>) to get faster and more accurate responses.
+        </div>
+        <div id="chat-token-row">
+          <span style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;white-space:nowrap">
+            Max output tokens: <strong id="chat-max-tokens-val" style="color:var(--accent2)">4096</strong>
+          </span>
+          <input type="range" id="chat-max-tokens-slider" min="512" max="8192" step="512" value="4096"
+            style="width:140px;accent-color:var(--accent);cursor:pointer;height:5px"
+            title="Maximum tokens the LLM can generate per response. Higher = longer answers but slower."/>
+          <span style="font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace">512 — 8192</span>
         </div>
         <div id="input-bar">
           <textarea id="chat-input" rows="2"
@@ -956,7 +966,7 @@ NUM_GPU=0</code></pre>
         <nav class="stab-sidebar">
           <button class="stab active" data-tab="tab-cluster"><span class="stab-icon">&#128279;</span>Kubeconfig</button>
           <button class="stab" data-tab="tab-kb"><span class="stab-icon">&#128196;</span>RAG Documents</button>
-          <button class="stab" data-tab="tab-output"><span class="stab-icon">&#127919;</span>LLM Input/Output</button>
+          <button class="stab" data-tab="tab-output"><span class="stab-icon">&#127919;</span>Chatbot Settings</button>
           <button class="stab" data-tab="tab-security"><span class="stab-icon">&#128274;</span>Security</button>
         </nav>
 
@@ -1033,12 +1043,10 @@ NUM_GPU=0</code></pre>
 
           <!-- ── Tab: Output ── -->
           <div class="stab-pane" id="tab-output">
-            <div class="stab-pane-title">&#127919; LLM Input / Output</div>
+            <div class="stab-pane-title">&#127919; Chatbot Settings</div>
             <div class="tip" style="border-left:3px solid #ef4444;color:var(--textMain);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px 10px;background:var(--tooltipBg);border-radius:0 4px 4px 0;margin-bottom:4px">
               💡 <strong style="color:#ef4444">Tip:</strong>
-              <strong>Max Input Chars</strong> controls how much cluster data the LLM <em>reads</em>.
-              <strong>Max Response Tokens</strong> controls how much the LLM <em>writes</em> (~4 chars/token).
-              Both can independently cause truncation — increase both if responses are cut off.
+              <strong>Max Input Chars</strong> controls how much cluster data the LLM <em>reads</em>. Increase if responses seem incomplete or truncated.
             </div>
             <div style="display:flex;flex-direction:column;gap:18px;padding:4px 0">
 
@@ -1056,19 +1064,6 @@ NUM_GPU=0</code></pre>
                 </p>
               </div>
 
-              <div>
-                <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
-                  MAX RESPONSE TOKENS (LLM output) &nbsp;<span style="color:var(--accent);font-size:14px;font-weight:700" id="max-tokens-val">4,096</span>
-                </label>
-                <input type="range" id="max-tokens-slider" min="512" max="8192" step="512" value="4096"
-                  style="width:100%;accent-color:var(--accent);cursor:pointer;height:6px"/>
-                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-                  <span>512</span><span>4 096</span><span>8 192</span>
-                </div>
-                <p style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;margin-top:4px">
-                  <code>MAX_NEW_TOKENS</code> — tokens the LLM can generate per response (~4 chars/token). Higher = longer answers but more VRAM and slower.
-                </p>
-              </div>
 
               <div>
                 <label style="font-size:12px;color:var(--panelLabel);font-family:'IBM Plex Mono',monospace;letter-spacing:.05em;display:block;margin-bottom:6px">
@@ -1254,6 +1249,13 @@ document.querySelectorAll('.mtab').forEach(btn => {
   // Results limit slider
   topkSlider.addEventListener('input', () => {
     topkVal.textContent = topkSlider.value;
+  });
+
+  // Chat max output tokens slider
+  const chatTokenSlider = document.getElementById('chat-max-tokens-slider');
+  const chatTokenVal    = document.getElementById('chat-max-tokens-val');
+  if(chatTokenSlider) chatTokenSlider.addEventListener('input', () => {
+    chatTokenVal.textContent = chatTokenSlider.value;
   });
 
   // Send on Enter (Shift+Enter = newline)
@@ -2115,7 +2117,12 @@ async function sendMessage(override){
     const res = await fetch('/chat/stream', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({message: q, decode_secrets: decodeSecrets, history: []}),
+      body: JSON.stringify({
+        message: q,
+        decode_secrets: decodeSecrets,
+        history: [],
+        max_new_tokens: parseInt(document.getElementById('chat-max-tokens-slider')?.value || '4096')
+      }),
     });
     if(!res.ok){
       const e = await res.json().catch(()=>({}));
