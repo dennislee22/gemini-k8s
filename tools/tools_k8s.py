@@ -2780,6 +2780,54 @@ def _get_first_running_pod(namespace: str) -> str:
     return ""
 
 
+def _find_pod_with_binary(namespace: str, binary: str, max_pods: int = 20) -> str:
+    """
+    Scan running pods in namespace until one is found that has `binary` available.
+    Returns pod name, or empty string if none found within max_pods attempts.
+    """
+    from kubernetes.stream import stream as _k8s_stream
+    try:
+        pods = _core.list_namespaced_pod(
+            namespace,
+            field_selector="status.phase=Running",
+            limit=max_pods,
+        ).items
+    except Exception:
+        return ""
+
+    # Score pods: prefer app/service/manager pods, deprioritise DB/metrics/logging
+    _prefer      = re.compile(r"(-app-|-service-|-manager-|-controller-|-worker-|-api-|-server-|-gateway-|-proxy-|-plane-app-|-platform-|-core-)", re.I)
+    _deprioritise = re.compile(r"(embedded-db|postgres|mysql|mariadb|prometheus|alertmanager|fluentd|fluent-bit|elasticsearch|kafka|zookeeper|-exporter-)", re.I)
+
+    def _pod_score(p):
+        name = p.metadata.name or ""
+        if _deprioritise.search(name):
+            return 2   # last
+        if _prefer.search(name):
+            return 0   # first
+        return 1       # middle
+
+    ordered = sorted(pods, key=_pod_score)
+
+    for p in ordered:
+        if not (p.status and p.status.phase == "Running"):
+            continue
+        pod_name = p.metadata.name
+        try:
+            resp = _k8s_stream(
+                _core.connect_get_namespaced_pod_exec,
+                pod_name, namespace,
+                command=["/bin/sh", "-c", f"which {binary} 2>/dev/null || command -v {binary} 2>/dev/null"],
+                stderr=True, stdin=False, stdout=True, tty=False, _preload_content=True,
+            )
+            if resp and resp.strip():
+                _log.info(f"[exec_pod_command] found {binary!r} in pod {pod_name!r}")
+                return pod_name
+        except Exception:
+            continue
+    return ""
+
+
 def exec_pod_command(namespace: str, pod_name: str, command: str, container: str = "") -> str:
     """
     Execute an arbitrary shell command inside a running pod using the K8s stream API.
@@ -2827,19 +2875,41 @@ def exec_pod_command(namespace: str, pod_name: str, command: str, container: str
     stream_kwargs = dict(stderr=True, stdin=False, stdout=True, tty=False, _preload_content=True)
     if container:
         stream_kwargs["container"] = container
-    try:
-        resp = _k8s_stream(
-            _core.connect_get_namespaced_pod_exec,
-            pod_name, namespace,
-            command=exec_cmd,
-            **stream_kwargs,
-        )
-        output = resp.strip() if isinstance(resp, str) else str(resp).strip()
-        return output or "(command returned no output)"
-    except ApiException as e:
-        return f"[ERROR] exec failed (pod={pod_name} ns={namespace}): {_safe_reason(e)}"
-    except Exception as exc:
-        return f"[ERROR] Unexpected exec error: {exc}"
+
+    def _run(pname: str) -> str:
+        try:
+            resp = _k8s_stream(
+                _core.connect_get_namespaced_pod_exec,
+                pname, namespace,
+                command=exec_cmd,
+                **stream_kwargs,
+            )
+            return resp.strip() if isinstance(resp, str) else str(resp).strip()
+        except ApiException as e:
+            return f"[ERROR] exec failed (pod={pname} ns={namespace}): {_safe_reason(e)}"
+        except Exception as exc:
+            return f"[ERROR] Unexpected exec error: {exc}"
+
+    output = _run(pod_name)
+
+    # If binary not found, scan other pods for one that has it
+    if output and ("not found" in output or "No such file" in output):
+        # Extract the binary name from the command (first word before any space/pipe)
+        _bin_match = re.match(r".*?([\w.-]+)\s*(?:\||$)", command)
+        binary_hint = _bin_match.group(1) if _bin_match else ""
+        # More targeted: look for "xyz: not found" pattern
+        _nf = re.search(r"(\S+):\s*not found", output)
+        if _nf:
+            binary_hint = _nf.group(1)
+        if binary_hint:
+            _log.warning(f"[exec_pod_command] {binary_hint!r} not in pod {pod_name!r}, searching other pods...")
+            better_pod = _find_pod_with_binary(namespace, binary_hint)
+            if better_pod and better_pod != pod_name:
+                _log.info(f"[exec_pod_command] retrying with pod {better_pod!r}")
+                output = _run(better_pod)
+                pod_name = better_pod
+
+    return output or "(command returned no output)"
 
 
 K8S_TOOLS: dict = {
