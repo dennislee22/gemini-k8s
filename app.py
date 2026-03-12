@@ -2365,7 +2365,7 @@ async def api_rag_query(query: str, top_k: int = 50, sheet: Optional[str] = None
         return _JSONResponse(status_code=500, content={"error": str(e)})
 
 
-def _llm_synthesise(context: str, question: str) -> str:
+def _llm_synthesise(context: str, question: str, top_k: int = 50) -> str:
     """
     Call the loaded LLM directly (no agent, no tools) to synthesise an answer
     from the provided RAG context. Uses whichever backend is loaded (HF or GGUF).
@@ -2381,7 +2381,11 @@ def _llm_synthesise(context: str, question: str) -> str:
         "a Kubernetes-based platform for running Cloudera Data Platform (CDP) workloads in an air-gapped environment. "
         "You answer questions strictly from the knowledge base context provided. Be concise and factual. "
         "Do NOT expand ECS as anything other than Embedded Container Service. "
-        "Do NOT call any cluster tools. Do NOT invent information not in the context."
+        "Do NOT call any cluster tools. Do NOT invent information not in the context. "
+        "IMPORTANT: If the question is a single letter, a partial word (e.g. 'wh', 'li', 'ab'), "
+        "or otherwise too short/unclear to interpret, respond ONLY with: "
+        "'I didn't quite understand that. Could you rephrase your question? "
+        "For example: list all known issues, what are the ECS prerequisites, show longhorn dos and donts.'"
     )
     if context:
         user_msg = (
@@ -2407,12 +2411,15 @@ def _llm_synthesise(context: str, question: str) -> str:
         {"role": "user",   "content": user_msg},
     ]
 
+    # Scale output tokens with number of results — more results need more tokens to cover
+    _max_out = min(512 + top_k * 16, 4096)
+
     try:
         if tok is None:
             # GGUF path
             resp = mdl.create_chat_completion(
                 messages=msgs,
-                max_tokens=1024,
+                max_tokens=_max_out,
                 temperature=0.3,
                 top_p=0.9,
                 repeat_penalty=1.05,
@@ -2429,7 +2436,7 @@ def _llm_synthesise(context: str, question: str) -> str:
             with torch.no_grad():
                 out = mdl.generate(
                     ids,
-                    max_new_tokens=1024,
+                    max_new_tokens=_max_out,
                     do_sample=False,
                     temperature=1.0,
                     repetition_penalty=1.05,
@@ -2499,7 +2506,7 @@ async def api_kb_ask(req: KbAskRequest):
         # Always call LLM — with context if RAG found results, without if not
         logger.info(f"[API/kb/ask] calling _llm_synthesise (rag_found={not no_rag})")
         answer = await _asyncio.get_event_loop().run_in_executor(
-            None, lambda: _llm_synthesise(rag_ctx, req.q)
+            None, lambda: _llm_synthesise(rag_ctx, req.q, top_k)
         )
         answer = answer or "I'm sorry, I was unable to generate a response. Please try rephrasing your question."
         logger.info(f"[API/kb/ask] synthesis done, answer chars={len(answer)}")
@@ -2559,7 +2566,7 @@ async def api_kb_stream(req: KbAskRequest):
             yield _sse({"type": "status", "text": f"Found {match_count} match(es) — synthesising answer…" if not no_rag else "No matches found — generating response…"})
 
             answer = await _asyncio.get_event_loop().run_in_executor(
-                None, lambda: _llm_synthesise(rag_ctx, q)
+                None, lambda: _llm_synthesise(rag_ctx, q, top_k)
             )
             answer = answer or "I'm sorry, I was unable to generate a response. Please try rephrasing your question."
             elapsed = round(_time.time() - start, 1)
