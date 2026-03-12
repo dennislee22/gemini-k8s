@@ -2391,8 +2391,11 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50) -> str:
         "as the ECS Knowledge Bot and mention you search a knowledge base of runbooks, known issues, "
         "prerequisites, dos and don'ts, and past learnings. Add that no documents have been ingested yet "
         "and the user should go to Settings \u2192 RAG Documents.\n"
-        "3. For all other questions with no context: respond ONLY with: "
-        "'No results found. Please ensure your RAG documents have been ingested via Settings \u2192 RAG Documents.'"
+        "3. If the question is clearly about ECS knowledge base topics (known issues, Longhorn, ingress, storage, "
+        "prerequisites, dos and don'ts, past learnings, runbooks, ECS components, Kubernetes errors): "
+        "respond ONLY with: 'No results found. Please ensure your RAG documents have been ingested "
+        "via Settings \u2192 RAG Documents.'\n"
+        "4. For anything else (conversational, general questions): respond naturally and helpfully in 1-2 sentences."
     )
     if context:
         user_msg = (
