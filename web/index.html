@@ -682,13 +682,13 @@ button{cursor:pointer;font-family:inherit}
         <div id="kb-bot-header">
           <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;font-family:'IBM Plex Mono',monospace">
             <label style="font-size:11px;color:var(--dimText);white-space:nowrap">
-              Max results: <strong id="kb-topk-val" style="color:var(--accent2)">50</strong>
+              Max output tokens: <strong id="kb-topk-val" style="color:var(--accent2)">1312</strong>
             </label>
             <input type="range" id="kb-topk-slider"
-              min="10" max="200" step="10" value="50"
+              min="512" max="4096" step="256" value="1312"
               style="width:120px;accent-color:var(--accent);cursor:pointer;height:5px"
-              title="How many knowledge base entries to retrieve. Increase if answers seem incomplete."/>
-            <span style="font-size:10px;color:var(--panelDim)">10 — 200</span>
+              title="Maximum tokens the LLM can generate. Higher = longer, more detailed answers."/>
+            <span style="font-size:10px;color:var(--panelDim)">512 — 4096</span>
           </div>
         </div>
         <div id="kb-bot-body">
@@ -1297,7 +1297,7 @@ document.querySelectorAll('.mtab').forEach(btn => {
       const res = await fetch('/api/kb/stream', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ q, top_k: topK })
+        body: JSON.stringify({ q, top_k: 50, max_tokens: topK })
       });
       const reader = res.body.getReader();
       const dec = new TextDecoder();

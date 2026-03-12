@@ -2365,7 +2365,7 @@ async def api_rag_query(query: str, top_k: int = 50, sheet: Optional[str] = None
         return _JSONResponse(status_code=500, content={"error": str(e)})
 
 
-def _llm_synthesise(context: str, question: str, top_k: int = 50) -> str:
+def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: int = 0) -> str:
     """
     Call the loaded LLM directly (no agent, no tools) to synthesise an answer
     from the provided RAG context. Uses whichever backend is loaded (HF or GGUF).
@@ -2413,8 +2413,8 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50) -> str:
         {"role": "user",   "content": user_msg},
     ]
 
-    # Scale output tokens with number of results — more results need more tokens to cover
-    _max_out = min(512 + top_k * 16, 4096)
+    # Use explicit max_tokens if provided; else scale from top_k
+    _max_out = max_tokens if max_tokens > 0 else min(512 + top_k * 16, 4096)
 
     try:
         if tok is None:
@@ -2460,6 +2460,7 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50) -> str:
 class KbAskRequest(BaseModel):
     q: str
     top_k: int = 50
+    max_tokens: int = 1312  # default matches top_k=50 scaling
     sheet: Optional[str] = None
 
 @api.post("/kb/ask", summary="ECS Knowledge Bot — RAG retrieval, returns formatted context")
@@ -2508,7 +2509,7 @@ async def api_kb_ask(req: KbAskRequest):
         # Always call LLM — with context if RAG found results, without if not
         logger.info(f"[API/kb/ask] calling _llm_synthesise (rag_found={not no_rag})")
         answer = await _asyncio.get_event_loop().run_in_executor(
-            None, lambda: _llm_synthesise(rag_ctx, req.q, top_k)
+            None, lambda: _llm_synthesise(rag_ctx, req.q, top_k, req.max_tokens)
         )
         answer = answer or "I'm sorry, I was unable to generate a response. Please try rephrasing your question."
         logger.info(f"[API/kb/ask] synthesis done, answer chars={len(answer)}")
@@ -2569,7 +2570,7 @@ async def api_kb_stream(req: KbAskRequest):
             yield _sse({"type": "status", "text": f"Found {match_count} match(es) — synthesising answer…" if not no_rag else "No matches found — generating response…"})
 
             answer = await _asyncio.get_event_loop().run_in_executor(
-                None, lambda: _llm_synthesise(rag_ctx, q, top_k)
+                None, lambda: _llm_synthesise(rag_ctx, q, top_k, req.max_tokens)
             )
             answer = answer or "I'm sorry, I was unable to generate a response. Please try rephrasing your question."
             elapsed = round(_time.time() - start, 1)
