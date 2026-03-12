@@ -1491,9 +1491,6 @@ def build_agent():
     return g.compile()
 
 _agent = None
-_kb_tokenizer = None
-_kb_model     = None
-_kb_is_qwen3  = False
 def get_agent():
     global _agent
     if _agent is None: _agent = build_agent()
@@ -2387,87 +2384,26 @@ async def api_kb_ask(req: KbAskRequest):
     top_k = max(10, min(req.top_k, 500))
     logger.info(f"[API] POST /api/kb/ask  q={req.q!r:.120}  top_k={top_k}")
 
-    KB_SYSTEM_PROMPT = (
-        "You are the ECS Knowledge Bot, a read-only assistant that answers questions "
-        "strictly from the provided knowledge base context. "
-        "The context contains runbooks, known issues, dos and don'ts, prerequisites, and past learnings "
-        "for a Cloudera ECS Kubernetes cluster.\n\n"
-        "Rules:\n"
-        "- Answer only from the context provided. Do not use general knowledge.\n"
-        "- If the context contains no relevant information, say so clearly.\n"
-        "- For Known Issues, present each issue as a structured block:\n"
-        "  **[Issue ID] Summary** | Severity | Status\n"
-        "  - Symptom   : ...\n"
-        "  - Root Cause: ...\n"
-        "  - Fix       : ...\n"
-        "  - Jira      : ...\n"
-        "- Flag UNRESOLVED issues with ⚠️.\n"
-        "- Be concise. Do not repeat the question. Do not add preamble.\n"
-        "- Never suggest live cluster operations — this bot has no cluster access."
-    )
-
-    # Ensure LLM is loaded — build_agent() populates _kb_tokenizer/_kb_model/_kb_is_qwen3
-    get_agent()
-
     try:
+        # 1. Retrieve RAG context
         context = await asyncio.get_event_loop().run_in_executor(
             None, lambda: rag_retrieve(query=req.q, top_k=top_k, sheet=req.sheet)
         )
+        logger.info(f"[API/kb/ask] RAG context chars={len(context)}")
 
-        user_msg = f"Context from knowledge base:\n\n{context}\n\nQuestion: {req.q}"
-
-        # ── GGUF path ──────────────────────────────────────────────────────────
-        if _kb_tokenizer is None:
-            resp = await asyncio.get_event_loop().run_in_executor(None, lambda: _kb_model.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": KB_SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_msg},
-                ],
-                max_tokens=max(512, _MAX_NEW_TOKENS),
-                temperature=0.3,
-                top_p=0.9,
-            ))
-            answer = resp["choices"][0]["message"].get("content", "").strip()
-
-        # ── HuggingFace Transformers path ──────────────────────────────────────
-        else:
-            import torch
-            chat_msgs = [
-                {"role": "system", "content": KB_SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
-            ]
-            template_kwargs = {"add_generation_prompt": True}
-            if _kb_is_qwen3:
-                template_kwargs["enable_thinking"] = False
-
-            encoded = _kb_tokenizer.apply_chat_template(
-                chat_msgs, tokenize=True, return_tensors="pt", **template_kwargs
-            )
-            input_ids = (encoded["input_ids"] if hasattr(encoded, "__getitem__") and not hasattr(encoded, "shape")
-                         else encoded).to(_kb_model.device)
-
-            _max_new = max(512, _MAX_NEW_TOKENS)
-            model_max = getattr(_kb_tokenizer, "model_max_length", None) or 32768
-            if model_max > 131072:
-                model_max = 32768
-            budget = model_max - _max_new - 64
-            if input_ids.shape[-1] > budget:
-                keep_head = budget // 2
-                keep_tail = budget - keep_head
-                input_ids = torch.cat([input_ids[:, :keep_head], input_ids[:, -keep_tail:]], dim=-1)
-
-            with torch.no_grad():
-                out = _kb_model.generate(
-                    input_ids,
-                    max_new_tokens=_max_new,
-                    do_sample=True,
-                    temperature=0.3,
-                    top_p=0.9,
-                    pad_token_id=_kb_tokenizer.eos_token_id,
-                )
-            new_tokens = out[0][input_ids.shape[-1]:]
-            answer = _kb_tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-
+        # 2. Synthesise using the existing agent pipeline.
+        #    Prefix the question with the retrieved context so the agent answers
+        #    from the KB only — no cluster tools will be triggered because the
+        #    system prompt's RULE says rag_search returns docs, not live data.
+        #    We explicitly tell the LLM to answer from the context provided.
+        kb_prompt = (
+            f"[KNOWLEDGE BASE CONTEXT]\n{context}\n[END CONTEXT]\n\n"
+            f"Using only the knowledge base context above, answer this question: {req.q}\n"
+            f"Do not call any cluster tools. Answer only from the context provided."
+        )
+        result = await run_agent(kb_prompt)
+        answer = result.get("response", "").strip() or "No answer could be generated."
+        logger.info(f"[API/kb/ask] answer chars={len(answer)}")
         return {"answer": answer, "query": req.q, "top_k": top_k}
 
     except Exception as e:
