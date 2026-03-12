@@ -2368,11 +2368,11 @@ class KbAskRequest(BaseModel):
     top_k: int = 50
     sheet: Optional[str] = None
 
-@api.post("/kb/ask", summary="ECS Knowledge Bot — RAG retrieval + LLM synthesis, no cluster tools")
+@api.post("/kb/ask", summary="ECS Knowledge Bot — RAG retrieval, returns formatted context")
 async def api_kb_ask(req: KbAskRequest):
     """
-    Retrieves relevant context from the LanceDB knowledge base, then asks the LLM
-    to synthesise a focused answer. No cluster tools are called.
+    Retrieves relevant context from the LanceDB knowledge base and returns it
+    formatted and ready for display.
 
     curl -s -X POST http://localhost:8000/api/kb/ask \\
          -H 'Content-Type: application/json' \\
@@ -2385,26 +2385,13 @@ async def api_kb_ask(req: KbAskRequest):
     logger.info(f"[API] POST /api/kb/ask  q={req.q!r:.120}  top_k={top_k}")
 
     try:
-        # 1. Retrieve RAG context
         context = await asyncio.get_event_loop().run_in_executor(
             None, lambda: rag_retrieve(query=req.q, top_k=top_k, sheet=req.sheet)
         )
         logger.info(f"[API/kb/ask] RAG context chars={len(context)}")
-
-        # 2. Synthesise using the existing agent pipeline.
-        #    Prefix the question with the retrieved context so the agent answers
-        #    from the KB only — no cluster tools will be triggered because the
-        #    system prompt's RULE says rag_search returns docs, not live data.
-        #    We explicitly tell the LLM to answer from the context provided.
-        kb_prompt = (
-            f"[KNOWLEDGE BASE CONTEXT]\n{context}\n[END CONTEXT]\n\n"
-            f"Using only the knowledge base context above, answer this question: {req.q}\n"
-            f"Do not call any cluster tools. Answer only from the context provided."
-        )
-        result = await run_agent(kb_prompt)
-        answer = result.get("response", "").strip() or "No answer could be generated."
-        logger.info(f"[API/kb/ask] answer chars={len(answer)}")
-        return {"answer": answer, "query": req.q, "top_k": top_k}
+        if not context.strip() or context == "No relevant documentation found.":
+            context = "No matching entries found in the knowledge base for this query."
+        return {"answer": context, "query": req.q, "top_k": top_k}
 
     except Exception as e:
         logger.error(f"[API/kb/ask] {e}", exc_info=True)
