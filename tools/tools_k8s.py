@@ -1311,6 +1311,7 @@ def _safe_reason(e) -> str:
     except Exception:
         return "Unknown API error"
 _ALLOW_WRITES     = os.getenv("KUBECTL_ALLOW_WRITES", "false").lower() in ("1", "true", "yes")
+_EXEC_POD_PATTERN = os.getenv("EXEC_POD_PATTERN", "").strip()  # e.g. "cdp-mlx-control-plane-app-"
 
 _KUBECTL_READ_VERBS  = {
     "get", "describe", "logs", "top", "rollout", "auth",
@@ -2860,8 +2861,20 @@ def exec_pod_command(namespace: str, pod_name: str, command: str, container: str
                 return f"[ERROR] Pod '{pod_name}' is not Running (phase={phase}) and no Running pods found in namespace '{namespace}'."
     except ApiException as e:
         if e.status == 404:
-            # pod_name doesn't exist — likely confused with a secret/cm name; auto-pick a real pod
-            real_pod = _get_first_running_pod(namespace)
+            # pod_name doesn't exist — likely confused with a secret/cm name
+            # Prefer EXEC_POD_PATTERN pod if configured
+            real_pod = ""
+            if _EXEC_POD_PATTERN:
+                try:
+                    all_pods = _core.list_namespaced_pod(namespace, field_selector="status.phase=Running", limit=200).items
+                    for p in all_pods:
+                        if p.metadata.name and p.metadata.name.startswith(_EXEC_POD_PATTERN):
+                            real_pod = p.metadata.name
+                            break
+                except Exception:
+                    pass
+            if not real_pod:
+                real_pod = _get_first_running_pod(namespace)
             if real_pod:
                 _log.warning(f"[exec_pod_command] pod {pod_name!r} not found (404), auto-selecting {real_pod!r}")
                 pod_name = real_pod
@@ -2913,6 +2926,7 @@ def exec_pod_command(namespace: str, pod_name: str, command: str, container: str
 
         def _pod_score(p):
             name = p.metadata.name or ""
+            if _EXEC_POD_PATTERN and name.startswith(_EXEC_POD_PATTERN): return -1  # always first
             if _deprioritise.search(name): return 2
             if _prefer.search(name):       return 0
             return 1

@@ -193,6 +193,11 @@ ALLOW_DB_EXEC=true
 KUBECTL_MAX_CHARS=20000
 MAX_NEW_TOKENS=4096
 LLM_TIMEOUT=300
+
+# Optional: pod name prefix to use for exec commands (e.g. openssl, base64).
+# Set this to a pod that has common utilities installed.
+# Example: EXEC_POD_PATTERN=cdp-mlx-control-plane-app-
+EXEC_POD_PATTERN=
 ```
 
 **CPU (GGUF) — `env` configuration:**
