@@ -1311,8 +1311,9 @@ def _safe_reason(e) -> str:
     except Exception:
         return "Unknown API error"
 _ALLOW_WRITES     = os.getenv("KUBECTL_ALLOW_WRITES", "false").lower() in ("1", "true", "yes")
-_EXEC_POD_PATTERN = os.getenv("EXEC_POD_PATTERN", "cdp-mlx-control-plane-app-").strip()
-_log.info(f"[tools_k8s] EXEC_POD_PATTERN={_EXEC_POD_PATTERN!r} (override with EXEC_POD_PATTERN env var)")
+_EXEC_POD_PATTERN   = os.getenv("EXEC_POD_PATTERN",   "mlx-control-plane-app-").strip()
+_EXEC_POD_CONTAINER = os.getenv("EXEC_POD_CONTAINER", "cdp-release-mlx-control-plane-app").strip()
+_log.info(f"[tools_k8s] EXEC_POD_PATTERN={_EXEC_POD_PATTERN!r} container={_EXEC_POD_CONTAINER!r}")
 
 _KUBECTL_READ_VERBS  = {
     "get", "describe", "logs", "top", "rollout", "auth",
@@ -2782,6 +2783,26 @@ def _get_first_running_pod(namespace: str) -> str:
     return ""
 
 
+def _find_exec_pod() -> tuple:
+    """
+    Find a running pod matching _EXEC_POD_PATTERN across ALL namespaces.
+    Returns (pod_name, namespace) or ('', '') if not found.
+    """
+    if not _EXEC_POD_PATTERN:
+        return "", ""
+    try:
+        pods = _core.list_pod_for_all_namespaces(
+            field_selector="status.phase=Running", limit=500
+        ).items
+        for p in pods:
+            if p.metadata.name and p.metadata.name.startswith(_EXEC_POD_PATTERN):
+                _log.info(f"[exec_pod] found EXEC_POD_PATTERN pod: {p.metadata.name!r} in ns={p.metadata.namespace!r}")
+                return p.metadata.name, p.metadata.namespace
+    except Exception as e:
+        _log.warning(f"[exec_pod] cluster-wide pod search failed: {e}")
+    return "", ""
+
+
 def _find_pod_with_binary(namespace: str, binary: str, max_pods: int = 100) -> str:
     """
     Scan running pods in namespace until one is found that has `binary` available.
@@ -2864,27 +2885,25 @@ def exec_pod_command(namespace: str, pod_name: str, command: str, container: str
         if e.status == 404:
             # pod_name doesn't exist — likely confused with a secret/cm name
             # Prefer EXEC_POD_PATTERN pod if configured
-            real_pod = ""
-            if _EXEC_POD_PATTERN:
-                try:
-                    all_pods = _core.list_namespaced_pod(namespace, field_selector="status.phase=Running", limit=200).items
-                    for p in all_pods:
-                        if p.metadata.name and p.metadata.name.startswith(_EXEC_POD_PATTERN):
-                            real_pod = p.metadata.name
-                            break
-                except Exception:
-                    pass
-            if not real_pod:
-                real_pod = _get_first_running_pod(namespace)
-            if real_pod:
-                _log.warning(f"[exec_pod_command] pod {pod_name!r} not found (404), auto-selecting {real_pod!r}")
-                pod_name = real_pod
+            # Search all namespaces for EXEC_POD_PATTERN pod
+            exec_pod, exec_ns = _find_exec_pod()
+            if exec_pod:
+                _log.warning(f"[exec_pod_command] pod {pod_name!r} not found (404), using EXEC_POD_PATTERN pod {exec_pod!r} ns={exec_ns!r} container={_EXEC_POD_CONTAINER!r}")
+                pod_name = exec_pod
+                namespace = exec_ns
+                if _EXEC_POD_CONTAINER and not container:
+                    container = _EXEC_POD_CONTAINER
             else:
-                return (
-                    f"[ERROR] '{pod_name}' is not a valid pod name in namespace '{namespace}'. "
-                    f"Use kubectl_exec('kubectl get pods -n {namespace} --field-selector=status.phase=Running "
-                    f"--no-headers -o custom-columns=NAME:.metadata.name') to get a real pod name first."
-                )
+                real_pod = _get_first_running_pod(namespace)
+                if real_pod:
+                    _log.warning(f"[exec_pod_command] pod {pod_name!r} not found (404), falling back to {real_pod!r}")
+                    pod_name = real_pod
+                else:
+                    return (
+                        f"[ERROR] '{pod_name}' is not a valid pod name in namespace '{namespace}'. "
+                        f"Use kubectl_exec('kubectl get pods -n {namespace} --field-selector=status.phase=Running "
+                        f"--no-headers -o custom-columns=NAME:.metadata.name') to get a real pod name first."
+                    )
         else:
             return f"[ERROR] Could not verify pod '{pod_name}': {_safe_reason(e)}"
 
@@ -2915,27 +2934,27 @@ def exec_pod_command(namespace: str, pod_name: str, command: str, container: str
         binary_hint = _nf.group(1) if _nf else "a required binary"
         _log.warning(f"[exec_pod_command] {binary_hint!r} missing in {pod_name!r}")
 
-        if _EXEC_POD_PATTERN:
-            # Find the preferred pod by prefix
-            preferred_pod = ""
+        exec_pod, exec_ns = _find_exec_pod()
+        if exec_pod and exec_pod != pod_name:
+            exec_container = _EXEC_POD_CONTAINER or ""
+            _log.info(f"[exec_pod_command] retrying with EXEC_POD_PATTERN pod {exec_pod!r} ns={exec_ns!r} container={exec_container!r}")
             try:
-                all_pods = _core.list_namespaced_pod(
-                    namespace, field_selector="status.phase=Running", limit=200
-                ).items
-                for p in all_pods:
-                    if p.metadata.name and p.metadata.name.startswith(_EXEC_POD_PATTERN):
-                        preferred_pod = p.metadata.name
-                        break
-            except Exception:
-                pass
+                _kw2 = dict(stderr=True, stdin=False, stdout=True, tty=False, _preload_content=True)
+                if exec_container:
+                    _kw2["container"] = exec_container
+                resp2 = _k8s_stream(
+                    _core.connect_get_namespaced_pod_exec,
+                    exec_pod, exec_ns,
+                    command=exec_cmd,
+                    **_kw2,
+                )
+                return resp2.strip() if isinstance(resp2, str) else str(resp2).strip()
+            except ApiException as e2:
+                return f"[ERROR] exec failed in EXEC_POD_PATTERN pod (pod={exec_pod} ns={exec_ns}): {_safe_reason(e2)}"
+            except Exception as e2:
+                return f"[ERROR] Unexpected exec error in EXEC_POD_PATTERN pod: {e2}"
 
-            if preferred_pod and preferred_pod != pod_name:
-                _log.info(f"[exec_pod_command] retrying with preferred pod {preferred_pod!r} (EXEC_POD_PATTERN={_EXEC_POD_PATTERN!r})")
-                return _run(preferred_pod)
-            elif not preferred_pod:
-                _log.warning(f"[exec_pod_command] no pod matching EXEC_POD_PATTERN={_EXEC_POD_PATTERN!r} found in namespace {namespace!r}")
-
-        return f"[ERROR] {binary_hint!r} not found in pod {pod_name!r}. Set EXEC_POD_PATTERN to a pod that has it."
+        return f"[ERROR] {binary_hint!r} not found in pod {pod_name!r} and no EXEC_POD_PATTERN pod available."
 
     return output or "(command returned no output)"
 
