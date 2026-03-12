@@ -2764,6 +2764,22 @@ def exec_db_query(namespace: str, sql: str,
     return header + output
 
 
+def _get_first_running_pod(namespace: str) -> str:
+    """Return the name of the first Running pod in namespace, or '' if none found."""
+    try:
+        pods = _core.list_namespaced_pod(
+            namespace,
+            field_selector="status.phase=Running",
+            limit=10,
+        ).items
+        for p in pods:
+            if p.status and p.status.phase == "Running":
+                return p.metadata.name
+    except Exception:
+        pass
+    return ""
+
+
 def exec_pod_command(namespace: str, pod_name: str, command: str, container: str = "") -> str:
     """
     Execute an arbitrary shell command inside a running pod using the K8s stream API.
@@ -2771,13 +2787,41 @@ def exec_pod_command(namespace: str, pod_name: str, command: str, container: str
 
     Args:
         namespace:  Pod namespace (e.g. "cdp")
-        pod_name:   Exact pod name (e.g. "cdp-embedded-db-0")
+        pod_name:   Exact pod name from kubectl get pods (e.g. "cdp-embedded-db-0")
         command:    Shell command to run (e.g. "echo '...' | openssl x509 -text -noout")
         container:  Container name for multi-container pods (optional)
     Returns:
         Command stdout/stderr output, or an error string.
     """
     from kubernetes.stream import stream as _k8s_stream
+
+    # ── Validate pod_name is an actual running pod, not a secret/cm name ────
+    try:
+        pod_obj = _core.read_namespaced_pod(pod_name, namespace)
+        phase = (pod_obj.status.phase or "") if pod_obj.status else ""
+        if phase != "Running":
+            # Pod exists but not running — find one that is
+            real_pod = _get_first_running_pod(namespace)
+            if real_pod:
+                _log.warning(f"[exec_pod_command] pod {pod_name!r} is {phase!r}, switching to {real_pod!r}")
+                pod_name = real_pod
+            else:
+                return f"[ERROR] Pod '{pod_name}' is not Running (phase={phase}) and no Running pods found in namespace '{namespace}'."
+    except ApiException as e:
+        if e.status == 404:
+            # pod_name doesn't exist — likely confused with a secret/cm name; auto-pick a real pod
+            real_pod = _get_first_running_pod(namespace)
+            if real_pod:
+                _log.warning(f"[exec_pod_command] pod {pod_name!r} not found (404), auto-selecting {real_pod!r}")
+                pod_name = real_pod
+            else:
+                return (
+                    f"[ERROR] '{pod_name}' is not a valid pod name in namespace '{namespace}'. "
+                    f"Use kubectl_exec('kubectl get pods -n {namespace} --field-selector=status.phase=Running "
+                    f"--no-headers -o custom-columns=NAME:.metadata.name') to get a real pod name first."
+                )
+        else:
+            return f"[ERROR] Could not verify pod '{pod_name}': {_safe_reason(e)}"
 
     exec_cmd = ["/bin/sh", "-c", command]
     stream_kwargs = dict(stderr=True, stdin=False, stdout=True, tty=False, _preload_content=True)
