@@ -2414,8 +2414,32 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
             + "Answer using only the context above."
         )
     else:
-        # No RAG results — system prompt rules handle gibberish/identity/unknown
-        user_msg = "Question: " + question
+        # No RAG results — handle entirely in Python, never let LLM hallucinate
+        _ql = question.lower().strip("?!. ")
+        _words = _ql.split()
+
+        # Rule 1: gibberish / too short
+        if len(_ql) < 4 or (len(_words) == 1 and len(_ql) < 6) or not any(c.isalpha() for c in _ql):
+            return ("Sorry, I didn't quite understand your question. Could you rephrase it? "
+                    "For example: list known issues with Longhorn, what are the prerequisites, "
+                    "what are the dos and don'ts.")
+
+        # Rule 2: identity / greeting — let LLM answer this one
+        _identity_kw = ["who are you", "what are you", "what can you do", "what do you do",
+                        "how are you", "hello", "hi", "hey", "introduce yourself",
+                        "tell me about yourself", "what is this", "help"]
+        if any(_ql == k or _ql.startswith(k) for k in _identity_kw):
+            user_msg = (
+                "Question: " + question + "\n\n"
+                "Respond in 2 sentences: introduce yourself as the ECS Knowledge Bot for Cloudera ECS "
+                "(Embedded Container Service), mention you search a knowledge base of runbooks, known issues, "
+                "prerequisites, dos and don'ts, and past learnings. "
+                "Note that no documents have been ingested yet — direct the user to Settings \u2192 RAG Documents."
+            )
+        else:
+            # Rule 3: everything else with no RAG docs — refuse outright, never hallucinate
+            return ("No results found. Please ensure your RAG documents have been ingested "
+                    "via Settings \u2192 RAG Documents.")
     msgs = [
         {"role": "system", "content": sys_prompt},
         {"role": "user",   "content": user_msg},
