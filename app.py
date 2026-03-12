@@ -839,6 +839,7 @@ class AgentState(TypedDict):
     iteration: int
     status_updates: list
     direct_answer: Optional[str]   # set by tool_node to bypass LLM synthesis
+    max_new_tokens: int             # per-request token override (0 = use global)
 
 def _build_llm():
     """
@@ -1255,7 +1256,7 @@ def build_agent():
         _log_ag.debug(f"[llm_node itr={itr}] chat_msgs count={len(chat_msgs)} has_tool_results={has_tool_results}")
 
         # ── Token budget ──────────────────────────────────────────────────────
-        _req_max = _req_max_tokens_var.get(0)  # per-request override (0 = use global)
+        _req_max = state.get('max_new_tokens', 0)  # per-request override from state
         if not has_tool_results:
             _max_new = 512
         else:
@@ -1562,6 +1563,7 @@ async def run_agent(user_message: str) -> dict:
         "tool_calls_made": [],
         "iteration": 0,
         "status_updates": [f"🤖 Model: {LLM_MODEL}"],
+        "max_new_tokens": 0,
     })
     elapsed = time.time() - t0
     last    = final["messages"][-1]
@@ -1603,7 +1605,6 @@ async def run_agent_streaming(user_message: str, history: list = None):
     yield _sse({"type": "status", "text": f"🤖 Model: {LLM_MODEL}"})
 
     agent          = get_agent()
-    _req_max_tokens_var.set(max_new_tokens)  # per-request token override
     t0             = time.time()
     all_updates: list      = [f"🤖 Model: {LLM_MODEL}"]
     tools_called: list     = []
@@ -1656,6 +1657,7 @@ async def run_agent_streaming(user_message: str, history: list = None):
                     "tool_calls_made": [],
                     "iteration":       0,
                     "status_updates":  [],
+                    "max_new_tokens":  max_new_tokens,
                 },
                 version="v2",
             ):
@@ -1772,6 +1774,7 @@ async def run_agent_streaming(user_message: str, history: list = None):
                         "tool_calls_made": [],
                         "iteration":       0,
                         "status_updates":  [],
+                        "max_new_tokens":  max_new_tokens,
                     }),
                     timeout=_STREAM_TIMEOUT,
                 )

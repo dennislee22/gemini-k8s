@@ -409,7 +409,7 @@ button{cursor:pointer;font-family:inherit}
 .ex-btn:hover{border-color:var(--accent);color:var(--accent2)}
 
 /* Input bar */
-#chat-token-row{display:flex;align-items:center;gap:10px;padding:6px 22px 0;background:var(--headerBg);flex-shrink:0}
+#chat-token-row{padding:10px 24px 0;flex-shrink:0;background:var(--headerBg)}
 #input-bar{padding:4px 22px 12px;background:var(--headerBg);display:flex;gap:10px}
 #chat-refresh-note{padding:8px 22px 4px;font-size:11.5px;color:var(--accent);background:var(--headerBg);font-weight:500;letter-spacing:.01em;border-top:1px solid var(--border)}
 #chat-input{
@@ -662,6 +662,17 @@ button{cursor:pointer;font-family:inherit}
 
       <!-- ── Chat pane ─────────────────────────────────────────────────── -->
       <div id="chat-pane">
+        <div id="chat-token-row">
+          <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;font-family:'IBM Plex Mono',monospace">
+            <label style="font-size:11px;color:var(--dimText);white-space:nowrap">
+              Max output tokens: <strong id="chat-max-tokens-val" style="color:var(--accent2)">4096</strong>
+            </label>
+            <input type="range" id="chat-max-tokens-slider" min="512" max="8192" step="512" value="4096"
+              style="width:120px;accent-color:var(--accent);cursor:pointer;height:5px"
+              title="Maximum tokens the LLM can generate per response. Higher = longer answers but slower."/>
+            <span style="font-size:10px;color:var(--panelDim)">512 — 8192</span>
+          </div>
+        </div>
         <div id="messages">
           <div id="examples">
             <div id="ex-label">EXAMPLE QUERIES</div>
@@ -670,15 +681,6 @@ button{cursor:pointer;font-family:inherit}
         </div>
         <div id="chat-refresh-note">
           💡 <strong>Tip:</strong> Each question is treated independently (no conversation history). For best results, always narrow the query (e.g. <em>list all RWO pvc in <strong>cdp</strong> namespace</em>) to get faster and more accurate responses.
-        </div>
-        <div id="chat-token-row">
-          <span style="font-size:11px;color:var(--dimText);font-family:'IBM Plex Mono',monospace;white-space:nowrap">
-            Max output tokens: <strong id="chat-max-tokens-val" style="color:var(--accent2)">4096</strong>
-          </span>
-          <input type="range" id="chat-max-tokens-slider" min="512" max="8192" step="512" value="4096"
-            style="width:140px;accent-color:var(--accent);cursor:pointer;height:5px"
-            title="Maximum tokens the LLM can generate per response. Higher = longer answers but slower."/>
-          <span style="font-size:10px;color:var(--panelDim);font-family:'IBM Plex Mono',monospace">512 — 8192</span>
         </div>
         <div id="input-bar">
           <textarea id="chat-input" rows="2"
