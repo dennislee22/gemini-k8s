@@ -399,6 +399,8 @@ button{cursor:pointer;font-family:inherit}
 }
 #ex-label{font-size:11px;color:#ffffff;font-family:'IBM Plex Mono',monospace;letter-spacing:.1em}
 #ex-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+#kb-ex-btns{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 14px}
+.kb-ex-label{font-size:10px;font-family:'IBM Plex Mono',monospace;color:var(--dimText);letter-spacing:.08em;text-transform:uppercase;width:100%;margin-bottom:2px}
 .ex-btn{
   background:var(--headerBg);border:1px solid var(--border);
   border-radius:8px;padding:6px 12px;font-size:12px;
@@ -694,6 +696,12 @@ button{cursor:pointer;font-family:inherit}
               <span style="font-size:10px;color:var(--panelDim)">10 — 200</span>
             </div>
           </div>
+        </div>
+        <div id="kb-ex-btns">
+          <div class="kb-ex-label">Example queries</div>
+          <button class="ex-btn" onclick="kbExSend(this)">List the known issues with Longhorn in 1.5.5 SP1</button>
+          <button class="ex-btn" onclick="kbExSend(this)">What can you do?</button>
+          <button class="ex-btn" onclick="kbExSend(this)">What are the dos &amp; don'ts</button>
         </div>
         <div id="kb-bot-body"></div>
         <div id="kb-bot-input-row">
@@ -1257,6 +1265,11 @@ document.querySelectorAll('.mtab').forEach(btn => {
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); askKb(); }
   });
   sendBtn.addEventListener('click', askKb);
+
+  function kbExSend(btn){
+    input.value = btn.textContent.trim();
+    askKb();
+  }
 
   async function askKb(){
     const q = input.value.trim();
