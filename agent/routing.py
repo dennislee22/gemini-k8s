@@ -104,10 +104,10 @@ def default_tools_for(user_msg: str) -> list:
     if _is_cluster_health:
         return [
             ("get_node_health", {}),
-            ("get_pod_status", {"namespace": "all", "show_all": False}),
-            ("get_deployment_status", {"namespace": "all"}),
-            ("get_pvc_status", {"namespace": "all"}),
-            ("get_events", {"namespace": "all", "warning_only": True}),
+            ("get_pod_status", {"namespace": ns, "show_all": False}),
+            ("get_deployment_status", {"namespace": ns}),
+            ("get_pvc_status", {"namespace": ns}),
+            ("get_events", {"namespace": ns, "warning_only": True}),
         ]
 
     return [("get_node_health", {}), ("get_pod_status", {"namespace": ns, "show_all": False})]
