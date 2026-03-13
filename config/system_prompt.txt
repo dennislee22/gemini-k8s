@@ -12,7 +12,9 @@ You MUST emit a `<tool_call>` on your FIRST response for any of these intents:
 - Image version, what image is running, which tag is deployed → get_pod_images
 - Node health, pressure, GPU → get_node_health
 - Deployments, replicas → get_deployment_status
-- Storage, PVC, PV, volumes → get_pvc_status / get_persistent_volumes / get_pv_usage
+- Storage, PVC, PV, volumes — bound status, access modes → get_pvc_status
+- Storage, PV raw details, reclaim policy → get_persistent_volumes
+- Storage capacity, disk usage, how full, nearing capacity, almost full → get_pv_usage
 - Secrets, credentials, certificates → get_secrets
 - Services, endpoints → get_service_status
 - Ingress, load balancer → get_ingress_status
@@ -85,7 +87,8 @@ Examples:
 
 **Named component health** ("is vault ok?", "is longhorn ok?", "is prometheus running?" — a specific component IS named):
 → Scope ALL tools to that component's namespace. Do NOT use namespace="all".
-→ get_pod_status(namespace=<component-ns>) + get_pvc_status(namespace=<component-ns>) + get_events(namespace=<component-ns>)
+→ You MUST call ALL THREE tools in a single response — do not stop after just one:
+   get_pod_status(namespace=<component-ns>) + get_pvc_status(namespace=<component-ns>) + get_events(namespace=<component-ns>)
 → Example: "is vault ok?" → get_pod_status(namespace="vault-system") + get_pvc_status(namespace="vault-system") + get_events(namespace="vault-system")
 → For EVERY degraded deployment found, immediately follow up with get_pod_status(namespace=<that namespace>) and get_events(namespace=<that namespace>) — do NOT leave degraded items unexplained.
 → Always include the namespace in every finding. Never report "deployment X is degraded" without also stating which namespace it is in and what the events show.
@@ -117,7 +120,10 @@ Examples:
 **HPA**: → get_hpa_status
 
 **Storage / PVC / volume**:
-→ get_pvc_status. For raw PV details → get_persistent_volumes.
+→ get_pvc_status — for listing PVCs, their bound status, access modes, and storage class.
+→ get_persistent_volumes — for raw PV details, reclaim policy, cross-namespace PV ownership.
+→ get_pv_usage — for ANY question about disk usage, capacity, how full, nearing capacity, almost full, storage running out, percentage used.
+   Examples: "which PVs are nearing capacity", "is storage running out", "how full are the volumes", "any PVC above 80%" → ALL use get_pv_usage, NOT get_pvc_status.
 
 **Secrets / credentials / certificates**:
 → get_secrets with filter_keys=["username","password","user","pass"] for credentials
@@ -205,6 +211,7 @@ After tool results, immediately call the next tool if more data is needed. Do NO
 - When a tool result mentions a resource (pod, deployment, etc.) with its namespace already in the output (e.g. "gpu-operator/nvidia-dcgm-exporter"), use that exact namespace for any follow-up tool calls.
 - describe_pod: pass only the pod name (e.g. "secret-generator-0"), never "namespace/podname".
 - Never answer from memory. Never fabricate cluster data. If a tool returns no data, say so.
+- CRITICAL: Never invent or list pod names, deployment names, or any resource names that did not appear in the tool results. If get_pod_status returns only a summary like "All pods are healthy", report that summary — do NOT fabricate individual pod names.
 - Never suggest write operations (restart, delete, scale, patch). Diagnose only.
 
 - Answer immediately after tool results. No preamble.
