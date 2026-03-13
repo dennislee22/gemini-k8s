@@ -1136,6 +1136,7 @@ def get_coredns_health() -> str:
         lines.append("\n  DNS resolution test:")
 
         test_pod_name = running_pods[0].metadata.name
+        lines.append(f"  (running nslookup from pod: {test_pod_name})")
 
         resolv = _exec_in_pod(test_pod_name, DNS_NS, "cat /etc/resolv.conf 2>/dev/null")
         lines.append(f"  /etc/resolv.conf (from {test_pod_name}):")
@@ -1173,11 +1174,18 @@ def get_coredns_health() -> str:
         if not test_targets:
             test_targets = ["kubernetes.default.svc.cluster.local"]
 
-        ns_flag = f"@{nameserver}" if nameserver else ""
+        import logging as _logging
+        _dns_log = _logging.getLogger("tools.coredns")
+
+        _dns_log.info(f"[coredns] test_pod={test_pod_name} nameserver={nameserver!r} search={search_domain!r}")
+        _dns_log.info(f"[coredns] test_targets={test_targets[:3]}")
+
         lines.append(f"\n  nslookup tests (nameserver: {nameserver or 'default'}, search: {search_domain or 'none'}):")
         for target in test_targets[:3]:
-            cmd = f"nslookup {target} {ns_flag} 2>&1"
+            cmd = f"nslookup {target} 2>&1"
+            _dns_log.info(f"[coredns] exec cmd: {cmd!r} in pod {test_pod_name}")
             output = _exec_in_pod(test_pod_name, DNS_NS, cmd)
+            _dns_log.info(f"[coredns] raw output: {output!r}")
             _out_lower = output.lower()
             _is_failure = (
                 not output
@@ -1193,8 +1201,9 @@ def get_coredns_health() -> str:
             )
             _has_address = bool(re.search(r'address[\s\d:]+\d+\.\d+\.\d+\.\d+', _out_lower))
             ok = _has_address and not _is_failure
+            _dns_log.info(f"[coredns] has_address={_has_address} is_failure={_is_failure} ok={ok}")
             flag = "✅" if ok else "❌"
-            lines.append(f"    {flag} nslookup {target} {ns_flag}")
+            lines.append(f"    {flag} nslookup {target}")
             for oline in output.splitlines():
                 lines.append(f"       {oline}")
     else:
