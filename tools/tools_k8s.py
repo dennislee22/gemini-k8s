@@ -1262,6 +1262,13 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
         "pod_memory": ["sort_desc(sum by (pod, namespace) (container_memory_usage_bytes)) / 1048576"],
     }
 
+    key = metric.lower().replace(" ", "_").replace("-", "_")
+    title, promql, unit = METRIC_MAP.get(key, (
+        f"Metric: {metric}",
+        metric,   # treat raw input as PromQL if not in map
+        "value",
+    ))
+
     # Metrics not available on this cluster (no node-exporter)
     _UNAVAILABLE = {"disk_io", "pvc_io", "network_in", "network_out"}
     if key in _UNAVAILABLE:
@@ -1269,13 +1276,6 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
                 f"Node-exporter is not installed, so disk I/O and network metrics are not scraped. "
                 f"Available metrics: cpu (pod CPU millicores), memory (pod memory MiB), "
                 f"pod_cpu, pod_memory, cluster_cpu, cluster_memory.")
-
-    key = metric.lower().replace(" ", "_").replace("-", "_")
-    title, promql, unit = METRIC_MAP.get(key, (
-        f"Metric: {metric}",
-        metric,   # treat raw input as PromQL if not in map
-        "value",
-    ))
 
     # ── Duration → seconds ─────────────────────────────────────────────────
     def _dur_seconds(s):
