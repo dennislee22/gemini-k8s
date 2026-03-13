@@ -1214,23 +1214,23 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
     METRIC_MAP = {
         # CPU — millicores per pod (this cluster has no node-exporter)
         "cpu":          ("Pod CPU Usage (millicores)",
-                         "sum by (pod, namespace (container_cpu_usage))",
+                         "sum by (pod, namespace) (container_cpu_usage)",
                          "m"),
         "node_cpu":     ("Pod CPU Usage (millicores)",
-                         "sum by (pod, namespace (container_cpu_usage))",
+                         "sum by (pod, namespace) (container_cpu_usage)",
                          "m"),
         "pod_cpu":      ("Pod CPU Usage (millicores)",
-                         "sum by (pod, namespace (container_cpu_usage))",
+                         "sum by (pod, namespace) (container_cpu_usage)",
                          "m"),
         # Memory — MiB per pod
         "memory":       ("Pod Memory Usage (MiB)",
-                         "sum by (pod, namespace (container_memory_usage_bytes)) / 1048576",
+                         "sum by (pod, namespace) (container_memory_usage_bytes) / 1048576",
                          "MiB"),
         "node_memory":  ("Pod Memory Usage (MiB)",
-                         "sum by (pod, namespace (container_memory_usage_bytes)) / 1048576",
+                         "sum by (pod, namespace) (container_memory_usage_bytes) / 1048576",
                          "MiB"),
         "pod_memory":   ("Pod Memory Usage (MiB)",
-                         "sum by (pod, namespace (container_memory_usage_bytes)) / 1048576",
+                         "sum by (pod, namespace) (container_memory_usage_bytes) / 1048576",
                          "MiB"),
         # Cluster-wide CPU limit total (single scalar — no node breakdown available)
         "cluster_cpu":  ("Cluster CPU Limits (cores)",
@@ -1259,9 +1259,9 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
         "cpu":        ["sum by (pod, namespace) (kube_metrics_server_pods_cpu)"],
         "node_cpu":   ["sum by (pod, namespace) (kube_metrics_server_pods_cpu)"],
         "pod_cpu":    ["sum by (pod, namespace) (kube_metrics_server_pods_cpu)"],
-        "memory":     ["sum by (pod, namespace (container_memory_usage_bytes)) / 1048576"],
-        "node_memory":["sum by (pod, namespace (container_memory_usage_bytes)) / 1048576"],
-        "pod_memory": ["sum by (pod, namespace (container_memory_usage_bytes)) / 1048576"],
+        "memory":     ["sum by (pod, namespace) (container_memory_usage_bytes) / 1048576"],
+        "node_memory":["sum by (pod, namespace) (container_memory_usage_bytes) / 1048576"],
+        "pod_memory": ["sum by (pod, namespace) (container_memory_usage_bytes) / 1048576"],
     }
 
     key = metric.lower().replace(" ", "_").replace("-", "_")
