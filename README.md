@@ -159,7 +159,7 @@ git clone https://huggingface.co/nomic-ai/nomic-embed-text-v1.5 /models/nomic-em
 
 The application automatically detects available GPUs at startup and uses them if present. If no GPU is found, it falls back to CPU inference without any manual configuration.
 
-- **GPU (recommended)** — use **[Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)** (full-precision, HuggingFace Transformers). Responses typically complete in **10–30 seconds**. Requires an NVIDIA GPU with at least 20 GB VRAM (e.g. A100, A30, RTX 3090/4090).
+- **GPU (recommended)** — use **[Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)** (full-precision, HuggingFace Transformers). Responses typically complete in **10–30 seconds**. Requires an NVIDIA GPU with at least 25 GB VRAM (e.g. A100, A30, RTX 3090/4090).
 - **CPU only** — use **[Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF)**, specifically the **Q4_K_M** quantisation, via `llama-cpp-python`. This reduces memory footprint significantly and is the only practical option for CPU inference. Responses take **several minutes per query** — acceptable for testing or low-frequency use.
 
 ### 1. Install dependencies
@@ -367,15 +367,13 @@ curl -s -X POST http://localhost:9000/api/config \
 
 ## Hardware Sizing
 
-| Inference mode | Model | RAM | VRAM |
+| Inference mode | Model | Min. RAM | Min. VRAM |
 |---|---|---|---|
-| GPU **(recommended)** | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 32 GB | ~20 GB |
-| CPU only | [Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF) Q4_K_M | min. 16 GB | — |
+| GPU **(recommended)** | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | 32 GB | 25 GB |
+| CPU only | [Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF) Q4_K_M | 64 GB | — |
 
-> ⚠️ CPU inference takes **several minutes** to generate a response per query. A GPU is strongly recommended for practical use.
-
-- **GPU:** Qwen3-8B in bfloat16 requires ~16–20 GB VRAM. Tested on A100 80 GB and A30 24 GB.
-- **CPU:** Qwen3-8B-Q4_K_M (GGUF) requires ~5–6 GB RAM for the model weights. A machine with at least 28 cores and 16 GB RAM is recommended for acceptable throughput.
+- **GPU:** Qwen3-8B in bfloat16 requires at least 25 GB VRAM. Tested on A100 80 GB and A30 24 GB.
+- **CPU:** Qwen3-8B-Q4_K_M (GGUF) requires at least 64 GB RAM. Responses take several minutes per query.
 
 ---
 
