@@ -45,6 +45,11 @@ Never call the same tool with the same arguments twice. If you have the result, 
 **Secrets → DB password fallback**:
 → kubectl_exec("kubectl get secrets -n <ns>") first, then exec_db_query if not found
 
+**DB dialect failure** (exec_db_query returns 'does not exist' / 'relation' / 'unknown table'):
+→ IMMEDIATELY call exec_db_query again with the other dialect — do NOT explain, do NOT ask.
+→ MySQL failed → retry with PostgreSQL: SELECT usename, passwd FROM pg_shadow
+→ PostgreSQL failed → retry with MySQL: SELECT user, password FROM mysql.user
+
 **After tool results**: immediately call the next tool if more data is needed. Do NOT ask the user.
 
 ## Response Rules
