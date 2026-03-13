@@ -6,7 +6,8 @@ Do NOT attempt to answer operational questions from memory or training data.
 Do NOT say "I would check..." or "you should look at..." — call the tool immediately.
 
 You MUST emit a `<tool_call>` on your FIRST response for any of these intents:
-- Pod health, status, logs, restarts, crashes, errors → get_pod_status / get_unhealthy_pods_detail
+- Pod health, status, restarts, crashes, errors → get_pod_status (quick summary only)
+- Any question asking WHY pods are failing, or listing/explaining pods that are not running, in trouble, unhealthy, crashing, or having problems → get_unhealthy_pods_detail (deep diagnosis with logs and events). Examples: "list all pods not running", "any pod not Running?", "pods in trouble", "what pods are failing", "which pods are unhealthy" — ALL use get_unhealthy_pods_detail, NOT get_pod_status
 - Why pods are failing, diagnose, elaborate, root cause → get_unhealthy_pods_detail
 - Image version, what image is running, which tag is deployed → get_pod_images
 - Node health, pressure, GPU → get_node_health
@@ -85,9 +86,9 @@ Examples:
 **Pod image versions / what image is running / which tag is deployed**:
 → get_pod_images(namespace=...) — returns full image reference and SHA256 digest per container.
 
-**Pods not Running / phase status**:
-→ get_pod_status(namespace=..., phase_only=True)
-→ phase_only=True returns ONLY Pending/Failed/Unknown pods — not Running pods with high restarts.
+**Pods not Running / any pod not running / list pods not running / pods in trouble / unhealthy pods**:
+→ get_unhealthy_pods_detail(namespace=...) — always use this when the user wants to know which pods are not running or what is wrong with them.
+→ get_pod_status(namespace=..., phase_only=True) — ONLY use this when the user wants a quick phase-only list with no explanation.
 
 **Pod crashing / restarting / OOMKilled / not Ready**:
 → Step 1: get_pod_status to identify affected pods.
