@@ -1174,14 +1174,21 @@ def get_coredns_health() -> str:
         for target in test_targets[:3]:
             cmd = f"nslookup {target} {ns_flag} 2>&1"
             output = _exec_in_pod(test_pod_name, DNS_NS, cmd)
-            ok = (
-                output
-                and "[exec failed" not in output
-                and "can't resolve" not in output.lower()
-                and "nxdomain" not in output.lower()
-                and "server can't find" not in output.lower()
-                and "FAILED" not in output
+            _out_lower = output.lower()
+            _is_failure = (
+                not output
+                or "[exec failed" in output
+                or "bad address" in _out_lower
+                or "can't resolve" in _out_lower
+                or "nxdomain" in _out_lower
+                or "server can't find" in _out_lower
+                or "no answer" in _out_lower
+                or "timed out" in _out_lower
+                or "connection refused" in _out_lower
+                or re.search(r'\bfailed\b', _out_lower) is not None
             )
+            _has_address = bool(re.search(r'address[\s\d:]+\d+\.\d+\.\d+\.\d+', _out_lower))
+            ok = _has_address and not _is_failure
             flag = "✅" if ok else "❌"
             lines.append(f"    {flag} nslookup {target} {ns_flag}")
             for oline in output.splitlines():

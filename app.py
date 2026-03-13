@@ -916,8 +916,17 @@ def build_agent():
         )
         _COMPARISON_KEYWORDS = (
             "most", "least", "fewest", "highest", "lowest", "which namespace",
-            "which node", "which pod", "rank", "top", "bottom", "compare",
+            "which node", "rank", "top", "bottom", "compare",
             "more than", "less than", "most pods", "least pods",
+        )
+        _ENUMERATION_PROBLEM_KEYWORDS = (
+            "which pods", "what pods", "pods have", "pods are", "pods with",
+            "pods that", "pods not", "pods failing", "pods having",
+            "any pods", "any pod", "pods problem", "problem pods",
+            "unhealthy pods", "failing pods", "broken pods", "bad pods",
+            "crashloopbackoff", "not running", "not ready", "not starting",
+            "problem to start", "fail to start", "failed to start",
+            "cannot start", "not starting", "unable to start",
         )
         _oq = original_question.lower()
         is_list_query = (
@@ -925,6 +934,7 @@ def build_agent():
             and not any(k in _oq for k in _ANALYSIS_KEYWORDS)
         )
         is_comparison_query = any(k in _oq for k in _COMPARISON_KEYWORDS)
+        is_enumeration_query = any(k in _oq for k in _ENUMERATION_PROBLEM_KEYWORDS)
 
         parts = []
         _tool_char_limit = 40000
@@ -933,7 +943,7 @@ def build_agent():
             parts.append(f"--- TOOL RESULT {i} ---\n{body}\n")
         combined = "".join(parts)
 
-        is_health_summary = len(tool_results) >= 3 and not is_list_query
+        is_health_summary = len(tool_results) >= 3 and not is_list_query and not is_enumeration_query
 
         if is_health_summary:
             synthesis_prompt = (
@@ -944,6 +954,16 @@ def build_agent():
                 "2. If any problems exist, list them specifically: name the exact pod, node, deployment, PVC, or event with the issue and its state.\n"
                 "3. If everything is healthy, say so briefly — do not list healthy items.\n"
                 "Use plain sentences. No markdown headers. No closing remarks."
+            )
+        elif is_enumeration_query and not is_comparison_query:
+            synthesis_prompt = (
+                f"Question: {original_question}\n\n"
+                f"Tool Results:\n{combined}\n"
+                "List EVERY pod that appears in the tool results above. "
+                "Do NOT skip, summarise, or omit any pod — include all of them. "
+                "For each pod state: namespace/name, phase or status (e.g. CrashLoopBackOff, Pending, Init), restart count, and a one-line reason if available. "
+                "If no unhealthy pods are found, say so explicitly. "
+                "No preamble. No closing remarks."
             )
         elif is_list_query and not is_comparison_query:
             synthesis_prompt = (
