@@ -1132,10 +1132,16 @@ def get_coredns_health() -> str:
         except Exception as exc:
             return f"[exec failed: {exc}]"
 
-    if running_pods:
+    # Only use pods whose name matches the actual CoreDNS deployment pattern
+    coredns_test_pods = [p for p in running_pods
+                         if "coredns" in p.metadata.name.lower()
+                         and "autoscaler" not in p.metadata.name.lower()
+                         and not p.metadata.name.lower().startswith("helm-install-")]
+
+    if coredns_test_pods:
         lines.append("\n  DNS resolution test:")
 
-        test_pod_name = running_pods[0].metadata.name
+        test_pod_name = coredns_test_pods[0].metadata.name
         lines.append(f"  (running nslookup from pod: {test_pod_name})")
 
         resolv = _exec_in_pod(test_pod_name, DNS_NS, "cat /etc/resolv.conf 2>/dev/null")

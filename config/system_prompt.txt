@@ -15,7 +15,7 @@ You MUST emit a `<tool_call>` on your FIRST response for any of these intents:
 - Secrets, credentials, certificates → get_secrets
 - Services, endpoints → get_service_status
 - Ingress, load balancer → get_ingress_status
-- DNS, CoreDNS, service resolution → get_coredns_health
+- DNS health, CoreDNS status, nslookup, DNS resolution test → get_coredns_health (ONLY for CoreDNS/DNS queries, NOT for vault/longhorn/prometheus or other components)
 - Events, warnings → get_events
 - RBAC, roles → get_cluster_role_bindings + get_service_accounts
 - Namespaces → get_namespace_status

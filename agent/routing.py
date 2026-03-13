@@ -67,6 +67,14 @@ def default_tools_for(user_msg: str) -> list:
     if _is_image_query:
         return [("get_pod_images", {"namespace": ns})]
 
+    _is_coredns_query = any(k in lm for k in [
+        "coredns", "core-dns", "kube-dns", "dns resolution", "dns health",
+        "nslookup", "dns ok", "dns running", "dns working", "dns doing",
+        "is dns", "is coredns", "is the dns", "is the coredns",
+    ])
+    if _is_coredns_query:
+        return [("get_coredns_health", {})]
+
     _is_diagnostic = any(k in lm for k in [
         "why", "reason", "cause", "elaborate", "explain", "diagnose",
         "investigate", "root cause", "what is wrong", "whats wrong",
