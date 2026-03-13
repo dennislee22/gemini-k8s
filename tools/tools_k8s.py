@@ -2667,7 +2667,7 @@ def exec_db_query(namespace: str, sql: str,
         # MySQL: SHOW TABLES  →  list tables in connected db (all non-system schemas)
         if re.match(r"^\s*SHOW\s+TABLES\s*$", pg_sql, re.IGNORECASE):
             pg_sql = (
-                "SELECT schemaname || '.' || tablename AS table "
+                "SELECT schemaname, tablename "
                 "FROM pg_tables "
                 "WHERE schemaname NOT IN ('information_schema','pg_catalog','pg_toast') "
                 "ORDER BY schemaname, tablename"
@@ -2685,7 +2685,7 @@ def exec_db_query(namespace: str, sql: str,
                 f"WHERE table_name = '{tbl}' ORDER BY ordinal_position"
             )
 
-        safe_sql = pg_sql  # use the rewritten SQL from here on
+        safe_sql = pg_sql.replace("'", "'\\''")  # escape after all PG translations
 
         # Try local Unix socket first (peer/trust auth — most common inside containers).
         # If host is explicitly set in env vars, use TCP instead.
