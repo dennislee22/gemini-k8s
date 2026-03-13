@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Cloudera ECS AI Ops
-"""
-
 import os, sys, argparse, re, hashlib, time, json, logging, logging.handlers
 from pathlib import Path
 from typing import Annotated, TypedDict, Literal, Optional
@@ -23,7 +18,6 @@ from langgraph.graph.message import add_messages
 
 from agent.bypass import should_bypass_llm, build_direct_answer
 from agent.routing import default_tools_for, resolve_namespace, NS_ALIASES
-
 
 _HERE = Path(__file__).resolve().parent
 
@@ -82,16 +76,10 @@ EMBED_MODEL     = os.getenv("EMBED_MODEL",         "nomic-ai/nomic-embed-text-v1
 LANCEDB_DIR     = os.getenv("LANCEDB_DIR",         str(_HERE / "lancedb"))
 CUSTOM_RULES    = os.getenv("CUSTOM_RULES",        "").strip()
 
-# tool-call JSON (e.g. small local models like Qwen3-8B).
 ENABLE_FALLBACK_ROUTING: bool = True
 
-# Runtime-adjustable generation cap.  Exposed via GET/POST /api/config and
-# the Settings → Max Output tab.  Synthesis calls use this value; tool-
-# selection calls always use 256 (just a small <tool_call> JSON block).
 _MAX_NEW_TOKENS: int = int(os.getenv("MAX_NEW_TOKENS", "4096"))
 
-# Request-scoped flag — True when the user has 'Show Secret Values' enabled in Settings.
-# Set per-request in chat_stream; read by agent/routing.py via get_decode_secrets().
 _decode_secrets_ctx: ContextVar[bool] = ContextVar("decode_secrets", default=False)
 
 def get_decode_secrets() -> bool:
@@ -121,10 +109,7 @@ def _detect_gpu_count() -> int:
 
 NUM_GPU = _detect_gpu_count()
 
-# Runtime-adjustable request timeout (seconds).  Exposed via GET/POST /api/config
-# and the Settings → LLM Input/Output tab.  Defaults to 900s on CPU, 300s on GPU.
 _LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "0")) or (900 if NUM_GPU == 0 else 300)
-
 
 _LOG_DIR = _HERE / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -160,9 +145,7 @@ logger   = get_logger("app")
 _log_rag = get_logger("rag")
 _log_ag  = get_logger("agent")
 
-
 from tools_k8s import K8S_TOOLS, _core, reload_kubeconfig
-
 
 CHUNK_SIZE    = 512
 CHUNK_OVERLAP = 64
@@ -170,14 +153,11 @@ TOP_K         = 10
 
 _embedder_fn  = None
 
-# ── LanceDB globals ───────────────────────────────────────────────────────────
-_lancedb_conn  = None   # lancedb.LanceDBConnection
-_docs_table    = None   # LanceTable — prose chunks (.md/.pdf/.txt)
-_excel_table   = None   # LanceTable — Excel structured rows
+_lancedb_conn  = None
+_docs_table    = None
+_excel_table   = None
 
-# Vector dimension — must match EMBED_MODEL output (nomic-embed-text-v1.5 = 768)
 _EMBED_DIM = 768
-
 
 def _get_embedder():
     global _embedder_fn
@@ -213,13 +193,10 @@ def _get_embedder():
     _embedder_fn = _local
     return _embedder_fn
 
-
 def embed_text(text: str) -> list:
     return _get_embedder()(text)
 
-
 def _get_lancedb():
-    """Return (connection, docs_table, excel_table), opening/creating as needed."""
     global _lancedb_conn, _docs_table, _excel_table
     if _lancedb_conn is not None:
         return _lancedb_conn, _docs_table, _excel_table
@@ -231,7 +208,6 @@ def _get_lancedb():
     _log_rag.info(f"[LanceDB] Opening store: {LANCEDB_DIR}")
     _lancedb_conn = lancedb.connect(LANCEDB_DIR)
 
-    # ── Prose docs table ──────────────────────────────────────────────────────
     docs_schema = pa.schema([
         pa.field("id",          pa.utf8()),
         pa.field("vector",      pa.list_(pa.float32(), _EMBED_DIM)),
@@ -247,24 +223,20 @@ def _get_lancedb():
         _docs_table = _lancedb_conn.create_table("docs", schema=docs_schema)
         _log_rag.info("[LanceDB] Created table: docs")
 
-    # ── Excel structured-issues table ─────────────────────────────────────────
-    # Primary search column: "symptom" — the vector is the embedding of the
-    # symptom/search text only.  All other columns are stored as typed fields
-    # and returned in full on retrieval, preserving column relationships.
     excel_schema = pa.schema([
         pa.field("id",            pa.utf8()),
         pa.field("vector",        pa.list_(pa.float32(), _EMBED_DIM)),
-        pa.field("source_file",   pa.utf8()),   # original filename
-        pa.field("file_hash",     pa.utf8()),   # for dedup / listing
+        pa.field("source_file",   pa.utf8()),
+        pa.field("file_hash",     pa.utf8()),
         pa.field("sheet",         pa.utf8()),
-        pa.field("symptom",       pa.utf8()),   # PRIMARY search column (embedded)
+        pa.field("symptom",       pa.utf8()),
         pa.field("issue_id",      pa.utf8()),
         pa.field("category",      pa.utf8()),
         pa.field("problem",       pa.utf8()),
         pa.field("root_cause",    pa.utf8()),
         pa.field("fix",           pa.utf8()),
         pa.field("severity",      pa.utf8()),
-        pa.field("present",       pa.utf8()),   # "Yes" = unresolved
+        pa.field("present",       pa.utf8()),
         pa.field("jira",          pa.utf8()),
         pa.field("discovered",    pa.utf8()),
         pa.field("resolved",      pa.utf8()),
@@ -285,11 +257,9 @@ def _get_lancedb():
 
     return _lancedb_conn, _docs_table, _excel_table
 
-
 def init_db():
     _get_lancedb()
     _get_embedder()
-
 
 def chunk_text(text: str) -> list:
     chunks, start = [], 0
@@ -309,7 +279,6 @@ def chunk_text(text: str) -> list:
         start = end - CHUNK_OVERLAP
     return chunks
 
-
 def _doc_type(filename: str) -> str:
     n = filename.lower()
     if any(k in n for k in ["known", "issue", "bug", "error"]):   return "known_issue"
@@ -317,9 +286,7 @@ def _doc_type(filename: str) -> str:
     if any(k in n for k in ["dos", "donts", "guidelines"]):       return "dos_donts"
     return "general"
 
-
 def ingest_file(file_path: str, force: bool = False) -> dict:
-    """Ingest a prose document (.md, .pdf, .txt) into the LanceDB docs table."""
     path  = Path(file_path)
     fhash = hashlib.md5(path.read_bytes()).hexdigest()
     _, docs_tbl, _ = _get_lancedb()
@@ -374,20 +341,7 @@ def ingest_file(file_path: str, force: bool = False) -> dict:
     docs_tbl.add(rows)
     return {"file": path.name, "status": "ingested", "chunks": len(chunks), "doc_type": doc_type}
 
-
 def ingest_excel(file_path: str, force: bool = False) -> dict:
-    """
-    Ingest a structured Excel knowledge base into the LanceDB excel_issues table.
-
-    Each sheet is processed with column-aware embedding:
-      - Known Issues   → vector = embed(symptom)
-      - Dos and Don'ts → vector = embed(do_text + " / " + dont_text)
-      - Prerequisites  → vector = embed(prerequisite)
-      - Past Learnings → vector = embed(what_went_wrong + " / " + key_learning)
-
-    The full row is stored alongside the vector so retrieval returns
-    complete structured context to the LLM — not just the matched text.
-    """
     try:
         import pandas as pd
     except ImportError:
@@ -529,7 +483,6 @@ def ingest_excel(file_path: str, force: bool = False) -> dict:
     _log_rag.info(f"[RAG/Excel] {path.name}: {total} rows ingested")
     return {"file": path.name, "status": "ingested", "chunks": total, "doc_type": "excel"}
 
-
 def ingest_directory(docs_dir: str, force: bool = False) -> list:
     p = Path(docs_dir)
     results = []
@@ -539,23 +492,11 @@ def ingest_directory(docs_dir: str, force: bool = False) -> list:
         results.append(ingest_excel(str(f), force=force))
     return results
 
-
 def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
                  sheet: Optional[str] = None) -> str:
-    """
-    Unified semantic retrieval across both LanceDB tables.
-
-    Searches excel_issues first (column-aware, unresolved issues surfaced first),
-    then the docs table (prose chunks).  Returns a single formatted context
-    string combining both, ready for the LLM synthesis step.
-
-    sheet: optional filter to restrict Excel results to a specific sheet.
-           Valid values: "Known Issues", "Dos and Donts", "Prerequisites", "Past Learnings"
-    """
     _, docs_tbl, excel_tbl = _get_lancedb()
     sections = []
 
-    # Normalise sheet name — accept common shorthands
     _SHEET_ALIASES = {
         "dos":          "Dos and Donts",
         "donts":        "Dos and Donts",
@@ -573,7 +514,6 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
     if sheet:
         sheet = _SHEET_ALIASES.get(sheet.lower().strip(), sheet)
 
-    # ── 1. Excel structured knowledge base ───────────────────────────────────
     try:
         excel_count = excel_tbl.count_rows()
     except Exception:
@@ -584,8 +524,6 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
             qvec = embed_text(query)
             sheet_filter = f"sheet = '{sheet}'" if sheet else None
 
-            # Try unresolved-first, fall back to all results
-            # NOTE: LanceDB .where() replaces the previous filter — combine into one
             try:
                 unresolved_filter = "present = 'Yes'"
                 if sheet_filter:
@@ -605,8 +543,6 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
                 if r["id"] not in seen:
                     seen.add(r["id"])
                     merged.append(r)
-            # No re-cap here — top_k already applied per search query above.
-            # Unresolved results are prepended so they surface first.
 
             if merged:
                 lines = [f"📋 Knowledge Base ({len(merged)} match(es)):\n"]
@@ -653,7 +589,6 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
         except Exception as e:
             _log_rag.warning(f"[RAG/Excel] Search failed: {e}")
 
-    # ── 2. Prose docs table ───────────────────────────────────────────────────
     try:
         docs_count = docs_tbl.count_rows()
     except Exception:
@@ -678,9 +613,7 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
 
     return "\n\n---\n\n".join(sections) if sections else "No relevant documentation found."
 
-
 def get_doc_stats() -> dict:
-    """Row counts and breakdown for both LanceDB tables."""
     try:
         _, docs_tbl, excel_tbl = _get_lancedb()
         docs_count  = docs_tbl.count_rows()
@@ -745,16 +678,9 @@ RAG_TOOLS = {
     },
 }
 
-
 _PROMPT_FILE = _HERE / "config" / "system_prompt.txt"
 
 def _load_system_prompt() -> str:
-    """
-    Load the system prompt from system_prompt.txt (next to app.py).
-    The file is re-read every time the agent is rebuilt, so you can edit it
-    and trigger a reload via  POST /api/reload-prompt  without restarting.
-    Falls back to a minimal hard-coded prompt if the file is missing.
-    """
     if _PROMPT_FILE.exists():
         text = _PROMPT_FILE.read_text(encoding="utf-8")
         logger.info(f"[Prompt] Loaded config/system_prompt.txt ({len(text)} chars)")
@@ -770,21 +696,6 @@ def _load_system_prompt() -> str:
 SYSTEM_PROMPT = _load_system_prompt()
 
 def _registry_to_openai_schema(name: str, cfg: dict) -> dict:
-    """
-    Convert a tool registry entry into the OpenAI function-calling JSON schema
-    that Qwen3's Jinja chat template expects when passed as tools=[...] to
-    tokenizer.apply_chat_template().
-
-    Qwen3 is trained on this exact format — the template serialises it into
-    the prompt as:
-        # Tools
-        ## get_pod_status
-        ...JSON schema...
-    and the model emits tool calls as:
-        <tool_call>
-        {"name": "get_pod_status", "arguments": {"namespace": "all"}}
-        </tool_call>
-    """
     params = cfg.get("parameters", {})
     properties = {}
     required = []
@@ -813,15 +724,13 @@ def _registry_to_openai_schema(name: str, cfg: dict) -> dict:
         schema["function"]["parameters"]["required"] = required
     return schema
 
-
 def _call_tool(name: str, args: dict, all_tools: dict) -> str:
-    """Invoke a tool by name from the registry with the given args, filling defaults."""
     cfg = all_tools.get(name)
     if not cfg:
         return f"Tool '{name}' not found."
     fn     = cfg["fn"]
     params = cfg.get("parameters", {})
-    # Fill missing defaults
+
     for k, v in params.items():
         if k not in args and "default" in v:
             args[k] = v["default"]
@@ -836,21 +745,9 @@ class AgentState(TypedDict):
     tool_calls_made: list
     iteration: int
     status_updates: list
-    direct_answer: Optional[str]   # set by tool_node to bypass LLM synthesis
+    direct_answer: Optional[str]
 
 def _build_llm():
-    """
-    Load tokenizer + model. Supports two backends:
-
-    1. GGUF (CPU-optimised quantised models):
-       Detected when LLM_MODEL ends with .gguf or contains 'gguf' in the name.
-       Uses llama-cpp-python for inference — no GPU required, runs efficiently on CPU.
-       Tool calls are parsed from raw text output (same <tool_call> block format).
-
-    2. HuggingFace Transformers (default):
-       Loads via AutoModelForCausalLM. GPU used automatically if available.
-       Qwen3 native tool-calling via tokenizer.apply_chat_template().
-    """
     _log_ag.info(f"[LLM] Loading model: {LLM_MODEL}")
 
     is_gguf = LLM_MODEL.lower().endswith(".gguf") or "gguf" in LLM_MODEL.lower()
@@ -887,21 +784,7 @@ def _build_llm():
         _log_ag.error(f"[LLM] Load failed: {e}")
         raise
 
-
 def _build_llm_gguf():
-    """
-    Load a GGUF model via llama-cpp-python for CPU inference.
-
-    Returns a (tokenizer=None, model=<Llama>, is_qwen3) tuple.
-    tokenizer is None — GGUF models use Llama's built-in tokeniser.
-    The llm_node detects tokenizer=None and uses the GGUF inference path.
-
-    Install: pip install llama-cpp-python
-    Environment variables:
-      LLM_MODEL     — path to .gguf file or HF repo/filename containing 'gguf'
-      GGUF_N_CTX    — context window size (default: 8192)
-      GGUF_N_THREADS — CPU threads (default: all available)
-    """
     try:
         from llama_cpp import Llama
     except ImportError:
@@ -915,26 +798,24 @@ def _build_llm_gguf():
     model_path = LLM_MODEL
     n_ctx      = int(os.environ.get("GGUF_N_CTX", "8192"))
     n_threads  = int(os.environ.get("GGUF_N_THREADS", str(os.cpu_count() or 4)))
-    n_gpu_layers = 0  # CPU-only — set to -1 to offload all layers to GPU if available
+    n_gpu_layers = 0
 
     _log_ag.info(f"[LLM/GGUF] Loading {model_path} | ctx={n_ctx} threads={n_threads}")
 
-    # If given a HF repo string like "org/model-name-GGUF" without a file path,
-    # attempt to pull the largest Q4_K_M or Q4_0 file via huggingface_hub.
     if not os.path.isfile(model_path):
         try:
             from huggingface_hub import hf_hub_download
-            # Try common quantisation filenames in preference order
+
             for quant in ["Q4_K_M.gguf", "Q4_0.gguf", "Q5_K_M.gguf", "Q8_0.gguf"]:
-                # Repo id may be "org/repo" — filename is the last path component
+
                 repo_id  = model_path
                 filename = quant
-                # If model_path looks like "org/repo/filename.gguf" split it
+
                 parts = model_path.split("/")
                 if len(parts) == 3 and parts[-1].endswith(".gguf"):
                     repo_id  = "/".join(parts[:2])
                     filename = parts[-1]
-                    quant    = filename  # skip loop after first match
+                    quant    = filename
                 try:
                     model_path = hf_hub_download(repo_id=repo_id, filename=filename)
                     _log_ag.info(f"[LLM/GGUF] Downloaded {filename} from {repo_id}")
@@ -964,8 +845,6 @@ def _build_llm_gguf():
 def build_agent():
     all_tools = {**K8S_TOOLS, **RAG_TOOLS}
 
-    # Build the OpenAI-schema list that Qwen3's Jinja chat template expects.
-    # Passed as tools= to tokenizer.apply_chat_template() in llm_node.
     tool_schemas = [_registry_to_openai_schema(n, c) for n, c in all_tools.items()]
     tool_names   = [s["function"]["name"] for s in tool_schemas]
     _log_ag.info(f"[build_agent] {len(tool_schemas)} tools: {tool_names}")
@@ -974,19 +853,13 @@ def build_agent():
 
     tokenizer, model, _is_qwen3 = _build_llm()
 
-    # Expose at module scope so /api/kb/ask can use the same loaded model
     globals()["_kb_tokenizer"] = tokenizer
     globals()["_kb_model"]     = model
     globals()["_kb_is_qwen3"]  = _is_qwen3
 
-    # System prompt — /no_think suffix is the Qwen3 soft switch for thinking mode.
-    # enable_thinking=False in apply_chat_template is the hard switch (Jinja-level).
     _sys_prompt = _load_system_prompt().format(custom_rules=CUSTOM_RULES or "None.")
     prompt = (_sys_prompt + "\n/no_think") if _is_qwen3 else _sys_prompt
 
-    # ── Tool routing — see agent/routing.py ──────────────────────────────────
-    # Namespace aliases and routing logic live in agent/routing.py.
-    # _default_tools_for and _resolve_namespace are imported at module level.
     def _default_tools_for(user_msg: str):
         return default_tools_for(user_msg)
 
@@ -994,37 +867,19 @@ def build_agent():
         return resolve_namespace(lm)
 
     def _prepare_messages_for_hf(msgs: list) -> list:
-        """
-        Prepare messages for the LLM call.
-
-        AGENTIC MODE: Pass the FULL conversation history at every call.
-        This is what enables multi-hop reasoning — Qwen3 sees its previous
-        tool calls and results and decides whether to call more tools or answer.
-
-        The system prompt's Tool Selection Guide replaces the old routing.py
-        keyword matching. Qwen3 reads the guide and selects tools accordingly.
-
-        For synthesis (after tools have run), we replace the raw tool messages
-        with a structured synthesis prompt to guide response format.
-        """
         if not msgs:
             return msgs
 
         has_tool_results = any(isinstance(m, ToolMessage) for m in msgs)
 
-        # ── Tool selection phase: pass full history so LLM sees conversation ──
-        # No filtering, no injection — the system prompt Tool Selection Guide
-        # tells Qwen3 what to call. Trust the LLM.
         if not has_tool_results:
             filtered = [m for m in msgs if isinstance(m, (HumanMessage, SystemMessage))]
             _log_ag.debug(f"[prepare_msgs] tool selection — passing {len(filtered)} msg(s)")
             return filtered
 
-        # ── Synthesis phase: build structured prompt from accumulated results ──
         original_question = next((m.content for m in msgs if isinstance(m, HumanMessage)), "")
         tool_results = [m for m in msgs if isinstance(m, ToolMessage)]
 
-        # Detect namespace assumption needed
         _oq_lower = original_question.lower()
         _NS_WORDS = ("namespace", " ns=", " ns ", "in namespace", "for namespace",
                      "in the namespace", "-n ", "cdp", "cmlwb", "longhorn", "vault",
@@ -1121,14 +976,6 @@ def build_agent():
         return [HumanMessage(content=_ns_prefix + synthesis_prompt)]
 
     def _msgs_to_qwen3(msgs: list, include_tools: bool) -> list:
-        """
-        Convert LangChain message objects to the plain dicts that
-        tokenizer.apply_chat_template() expects.
-
-        Qwen3 tool turn format:
-          assistant: {"role": "assistant", "content": "", "tool_calls": [...]}
-          tool:      {"role": "tool", "name": "...", "content": "..."}
-        """
         result = []
         for m in msgs:
             if isinstance(m, SystemMessage):
@@ -1136,7 +983,7 @@ def build_agent():
             elif isinstance(m, HumanMessage):
                 result.append({"role": "user", "content": m.content})
             elif isinstance(m, ToolMessage):
-                # Find the tool name from the preceding AIMessage tool_calls
+
                 tname = "tool"
                 for prev in reversed(result):
                     if prev.get("role") == "assistant":
@@ -1147,10 +994,10 @@ def build_agent():
                         break
                 result.append({"role": "tool", "name": tname, "content": m.content})
             else:
-                # AIMessage — may carry tool_calls
+
                 tcs = getattr(m, "tool_calls", None) or []
                 if tcs:
-                    # Format tool_calls as Qwen3 expects in the assistant turn
+
                     formatted_tcs = [
                         {
                             "id":       tc.get("id", ""),
@@ -1172,25 +1019,13 @@ def build_agent():
         return result
 
     def _parse_tool_calls(text: str) -> list:
-        """
-        Parse Qwen3 tool call output.
-
-        Qwen3 emits tool calls as:
-            <tool_call>
-            {"name": "get_node_health", "arguments": {}}
-            </tool_call>
-
-        Returns a list of {"id": str, "name": str, "args": dict} dicts,
-        ready to be stored in AIMessage.tool_calls.
-        """
         import uuid
         tcs = []
         for m in re.finditer(r'<tool_call>\s*(.*?)\s*</tool_call>', text, re.DOTALL):
             raw = m.group(1).strip()
             try:
                 obj = json.loads(raw)
-                # arguments may be a pre-serialized JSON string (Qwen3 sometimes
-                # emits them that way) — parse it to avoid double-escaping later.
+
                 args_raw = obj.get("arguments", {})
                 args_parsed = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                 tcs.append({
@@ -1204,30 +1039,11 @@ def build_agent():
         return tcs
 
     def llm_node(state: AgentState):
-        """
-        Invoke Qwen3 natively via tokenizer.apply_chat_template().
-
-        AGENTIC MODE:
-        - Tools are available at EVERY iteration, not just itr=1.
-        - Qwen3 sees the full conversation: user question + all previous tool
-          calls + all tool results. It decides autonomously whether to call
-          another tool or produce a final answer.
-        - This enables genuine multi-hop reasoning:
-            itr=1: call get_pod_status → sees OOMKilled
-            itr=2: call get_resource_quotas → sees 256Mi limit
-            itr=3: call get_events → sees repeated OOM events
-            itr=4: synthesise final answer
-        - Token budget raised to 512 for tool selection iters so multi-tool
-          calls fit comfortably.
-        - Fallback routing only fires when Qwen3 produces NOTHING at itr=1
-          (complete failure), not when it picks fewer tools than we'd like.
-        """
         import torch
         itr    = state.get("iteration", 0) + 1
         msgs   = state["messages"]
         updates = list(state.get("status_updates", []))
 
-        # ── LLM bypass — tool_node already set a direct answer ───────────────
         if state.get("direct_answer"):
             _log_ag.info(f"[llm_node itr={itr}] direct_answer bypass — skipping inference")
             return {
@@ -1240,30 +1056,20 @@ def build_agent():
 
         has_tool_results = any(isinstance(m, ToolMessage) for m in msgs)
 
-        # ── AGENTIC: include tools on every iteration ─────────────────────────
-        # After tool results exist, _prepare_messages_for_hf switches to the
-        # synthesis prompt format — we still pass tools= so the LLM CAN call
-        # another tool if it judges that necessary (multi-hop), but the
-        # synthesis prompt nudges it to answer if results are sufficient.
         include_tools = True
 
-        # ── Build message list ────────────────────────────────────────────────
         invoke_msgs = _prepare_messages_for_hf(msgs)
         chat_msgs = [{"role": "system", "content": prompt}] + _msgs_to_qwen3(invoke_msgs, include_tools)
         _log_ag.debug(f"[llm_node itr={itr}] chat_msgs count={len(chat_msgs)} has_tool_results={has_tool_results}")
 
-        # ── Token budget ──────────────────────────────────────────────────────
         if not has_tool_results:
             _max_new = 512
         else:
             _max_new = max(512, _MAX_NEW_TOKENS)
         _log_ag.debug(f"[llm_node itr={itr}] max_new_tokens={_max_new}")
 
-        # ── GGUF path (tokenizer is None) ─────────────────────────────────────
         if tokenizer is None:
-            # llama-cpp-python: use create_chat_completion for chat format.
-            # Tools are injected into the system prompt as JSON since llama-cpp
-            # doesn't support the apply_chat_template tools= kwarg universally.
+
             tools_json = json.dumps(tool_schemas, indent=2)
             tool_system = (
                 f"{prompt}\n\n"
@@ -1271,7 +1077,7 @@ def build_agent():
                 f"{tools_json}"
             )
             gguf_msgs = [{"role": "system", "content": tool_system}]
-            for m in chat_msgs[1:]:   # skip the original system msg — already merged
+            for m in chat_msgs[1:]:
                 gguf_msgs.append(m)
 
             resp = model.create_chat_completion(
@@ -1285,7 +1091,6 @@ def build_agent():
             raw_text = resp["choices"][0]["message"].get("content", "") or ""
             _log_ag.info(f"[llm_node/GGUF itr={itr}] raw output: {raw_text[:400]!r}")
 
-        # ── HuggingFace Transformers path ─────────────────────────────────────
         else:
             import torch
             template_kwargs = {"add_generation_prompt": True}
@@ -1304,16 +1109,11 @@ def build_agent():
             input_len = input_ids.shape[-1]
             _log_ag.debug(f"[llm_node itr={itr}] input tokens={input_len}")
 
-            # ── Context window guard ──────────────────────────────────────────
-            # If input + output budget would exceed the model's context window,
-            # trim the input by dropping tokens from the middle of the tool
-            # results (preserving the system prompt head and synthesis tail).
             model_max = getattr(tokenizer, "model_max_length", None) or 32768
-            # model_max_length is sometimes set to absurd values (e.g. 1e30) by
-            # HF configs — cap to a sane value.
+
             if model_max > 131072:
                 model_max = 32768
-            budget = model_max - _max_new - 64   # 64 token safety margin
+            budget = model_max - _max_new - 64
             if input_len > budget:
                 overflow = input_len - budget
                 keep_head = budget // 2
@@ -1345,14 +1145,12 @@ def build_agent():
             raw_text   = tokenizer.decode(new_tokens, skip_special_tokens=True)
             _log_ag.info(f"[llm_node itr={itr}] raw output: {raw_text[:400]!r}")
 
-        # ── Parse tool calls ─────────────────────────────────────────────────
         tcs = _parse_tool_calls(raw_text)
         _log_ag.info(f"[llm_node itr={itr}] tool_calls parsed: {[tc['name'] for tc in tcs]}")
 
         content = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', raw_text).strip()
         content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
 
-        # Namespace prefix extraction
         _ns_prepend = ""
         for m in invoke_msgs:
             if isinstance(m, HumanMessage):
@@ -1363,20 +1161,15 @@ def build_agent():
         if _ns_prepend:
             content = _ns_prepend + content
 
-        # ── Fallback routing — only when itr=1 produces nothing at all ───────
-        # This handles complete LLM failures (empty output, malformed JSON).
-        # It does NOT fire just because Qwen3 picked fewer tools than expected —
-        # that's now the LLM's prerogative in agentic mode.
         if not tcs and not content.strip() and itr == 1 and ENABLE_FALLBACK_ROUTING:
             user_msg = next((m.content for m in reversed(msgs) if isinstance(m, HumanMessage)), "")
             _log_ag.warning(f"[llm_node itr={itr}] complete failure — fallback routing for: {user_msg!r}")
             import uuid
             fallback = _default_tools_for(user_msg)
 
-            # ── Conversational / how-to sentinel — no tool needed ─────────────
             if fallback and fallback[0][0] == "__conversational__":
                 _log_ag.info("[llm_node] how-to query — injecting conversational prompt")
-                # Re-run LLM with a focused conversational prompt instead of tool calls
+
                 conv_msgs = msgs + [HumanMessage(content=(
                     f"The user asked: {user_msg!r}\n\n"
                     "Answer this as the ECS Operations Assistant — explain step by step "
@@ -1416,18 +1209,12 @@ def build_agent():
             "status_updates": updates,
         }
 
-    # ── LLM bypass — see agent/bypass.py ────────────────────────────────────
-    # should_bypass_llm() and build_direct_answer() are imported at module level.
-    # The bypass rules (BYPASS_TOOLS, BYPASS_TOOL_ARGS, ANALYSIS_INTENTS) live
-    # in agent/bypass.py and are unit-testable without loading the LLM.
-
     def tool_node(state: AgentState):
         last         = state["messages"][-1]
         results      = []
         tools_called = list(state.get("tool_calls_made", []))
         updates      = list(state.get("status_updates", []))
 
-        # Original user question — needed for bypass intent check
         user_q = next((m.content for m in state["messages"]
                        if isinstance(m, HumanMessage)), "")
 
@@ -1440,11 +1227,6 @@ def build_agent():
             name = tc["name"]
             args = dict(tc.get("args", {}) or {})
 
-            # ── Security: enforce decode from the UI toggle, never from LLM ──
-            # The LLM must not control whether secret values are decoded —
-            # it has no knowledge of the user's security preference and will
-            # always set decode=True when the query mentions passwords/credentials.
-            # Strip any LLM-supplied decode and replace with the ContextVar value.
             if name == "get_secrets":
                 llm_decode = args.pop("decode", None)
                 server_decode = get_decode_secrets()
@@ -1464,7 +1246,6 @@ def build_agent():
             _log_ag.debug(f"[tool_node] {name} result preview: {str(out)[:200]!r}")
             results.append(ToolMessage(content=out, tool_call_id=tc["id"]))
 
-            # Check if this single-tool result can bypass LLM synthesis
             if len(tcs) == 1 and should_bypass_llm(name, args, out, user_q):
                 _log_ag.info(f"[tool_node] LLM bypass — returning tool output directly for {name!r}")
                 updates.append("⚡ Direct output (LLM synthesis skipped)")
@@ -1479,8 +1260,7 @@ def build_agent():
         }
 
     def router(state: AgentState) -> Literal["tools", "end"]:
-        # Cap at 6 iterations — enough for 4-hop tool chains + synthesis.
-        # In agentic mode each tool call is one hop: pod → quotas → events → answer.
+
         if state.get("iteration", 0) >= 6: return "end"
         return "tools" if getattr(state["messages"][-1], "tool_calls", None) else "end"
 
@@ -1499,9 +1279,9 @@ def get_agent():
     return _agent
 
 def _clean_response(text: str, user_question: str = "") -> str:
-    # Strip Qwen3 <think>...</think> blocks (non-thinking mode may still emit empty ones)
+
     text = re.sub(r'<think>[\s\S]*?</think>\s*', '', text)
-    # Strip Qwen2.5 / legacy special tokens
+
     text = re.sub(r'<\|im_start\|>\w+\s*\n?[\s\S]*?<\|im_end\|>\n?', '', text)
     if '<|im_start|>' in text: text = re.sub(r'^\w+\s*\n', '', text.split('<|im_start|>')[-1], count=1)
     for tok in ['<|im_end|>', '<s>', '</s>', '[INST]', '[/INST]', '<<SYS>>', '<</SYS>>']: text = text.replace(tok, '')
@@ -1545,7 +1325,6 @@ def _clean_response(text: str, user_question: str = "") -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-
 async def run_agent(user_message: str) -> dict:
     import uuid as _uuid
     req_id = _uuid.uuid4().hex[:8]
@@ -1581,15 +1360,6 @@ async def run_agent(user_message: str) -> dict:
     }
 
 async def run_agent_streaming(user_message: str, history: list = None, max_new_tokens: int = 0):
-    """
-    Async generator that yields Server-Sent Events (SSE) strings.
-
-    Event types emitted:
-      data: {"type": "status",  "text": "..."}          — agent status update
-      data: {"type": "tool",    "name": "...", "cmd": "..."}  — tool being called
-      data: {"type": "result",  ...full response payload...}  — final answer
-      data: {"type": "error",   "text": "..."}          — exception
-    """
     def _sse(payload: dict) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
@@ -1611,21 +1381,15 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
     final_answer: str      = ""
     iteration_count: int   = 0
 
-    # Hard timeout — uses the runtime-adjustable _LLM_TIMEOUT (default 900s CPU, 300s GPU).
-    # Adjustable via GET/POST /api/config or Settings → LLM Input/Output.
     _STREAM_TIMEOUT = _LLM_TIMEOUT
 
     try:
         import asyncio as _asyncio
 
-        # ── Heartbeat: emit a "Still processing…" SSE every 15s so the user
-        # knows the server is alive during long LLM generation passes.
-        # The event queue bridges the heartbeat task and the main generator.
         _hb_queue: _asyncio.Queue = _asyncio.Queue()
         _hb_stop = _asyncio.Event()
 
         async def _heartbeat_task():
-            """Emit elapsed-time pings every 15s while the agent is running."""
             tick = 0
             while not _hb_stop.is_set():
                 try:
@@ -1639,7 +1403,7 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
         _hb_task = _asyncio.ensure_future(_heartbeat_task())
 
         async def _run_stream():
-            # Build message list: prior conversation turns + current message
+
             from langchain_core.messages import AIMessage as _AIMessage
             history_msgs = []
             for turn in (history or []):
@@ -1660,18 +1424,18 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
                 version="v2",
                 config={"recursion_limit": 12},
             ):
-                # Drain any pending heartbeat pings before each agent event
+
                 while not _hb_queue.empty():
                     tick = _hb_queue.get_nowait()
                     yield {"_heartbeat": tick}
                 yield event
-            # Drain final heartbeats
+
             while not _hb_queue.empty():
                 tick = _hb_queue.get_nowait()
                 yield {"_heartbeat": tick}
 
         async for event in _run_stream():
-            # ── Heartbeat event — tell the user we're still working ───────────
+
             if "_heartbeat" in event:
                 tick = event["_heartbeat"]
                 hb_txt = f"⏳ Still processing… ({tick}s elapsed)"
@@ -1733,8 +1497,6 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
                     f"  has_answer={bool(final_answer)}  updates={node_updates}"
                 )
 
-                # ── Emit iteration stage event ────────────────────────────────
-                # This is what lets the UI show the loop timeline in real time.
                 if has_tool_calls:
                     itr_txt = f"🔄 Loop {iteration_count} — LLM called tools, waiting for results…"
                 elif final_answer:
@@ -1761,9 +1523,6 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
         )
         yield _sse({"type": "status", "text": done_txt})
 
-        # The graph already ran the full cycle (tool selection → tools → synthesis).
-        # The final answer is in final_answer captured from on_chain_end of the graph.
-        # If not captured, fall back to a single ainvoke.
         raw = final_answer
         if not raw:
             try:
@@ -1808,7 +1567,6 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
     finally:
         _MAX_NEW_TOKENS = _saved_max_tokens
 
-
 def _gpu_metrics() -> list:
     gpus = []
     try:
@@ -1841,7 +1599,6 @@ def _gpu_metrics() -> list:
     return gpus
 
 def _run_startup_checks():
-    """Run kubectl tool smoke-tests and log results."""
     from tools_k8s import K8S_TOOLS as _tools
 
     SMOKE_TESTS = [
@@ -1916,7 +1673,7 @@ app = FastAPI(title="Cloudera ECS AI Ops", lifespan=_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 class HistoryMessage(BaseModel):
-    role: str   # "user" or "assistant"
+    role: str
     content: str
 
 class ChatRequest(BaseModel):
@@ -1958,11 +1715,6 @@ async def chat(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
-    """
-    SSE endpoint — emits agent events in real-time as the agentic loop runs.
-    Each line is: data: <json>\\n\\n
-    Event types: status | tool | result | error
-    """
     if not req.message.strip():
         raise HTTPException(400, "Empty message")
     logger.info(f"[API] POST /chat/stream  message={req.message!r:.120}  decode_secrets={req.decode_secrets}  history_turns={len(req.history)}")
@@ -1972,13 +1724,6 @@ async def chat_stream(req: ChatRequest):
     import asyncio as _asyncio
 
     async def _keepalive_stream():
-        """
-        Pumps run_agent_streaming through a queue so keep-alive SSE comment
-        bytes can be sent every 10s during long CPU inference gaps.
-        The agent generator runs in a background task; the main loop polls the
-        queue with a timeout and emits ': keep-alive' when nothing arrives,
-        resetting the browser/proxy TCP idle timer without touching the agent.
-        """
         queue: _asyncio.Queue = _asyncio.Queue()
         _SENTINEL = object()
 
@@ -2040,14 +1785,6 @@ async def ingest_upload_real(
     files: list[UploadFile] = File(...),
     force: str = FastAPIForm(default="false"),
 ):
-    """
-    Upload documents directly into LanceDB via multipart form upload.
-    Accepts .md, .pdf, .txt files (prose → docs table) and
-    .xlsx / .xls files (structured Excel → excel_issues table).
-
-    curl -s -X POST http://localhost:8000/api/ingest/upload \\
-         -F 'files=@runbook.md' -F 'files=@knowledge_base.xlsx' -F 'force=false'
-    """
     do_force = force.lower() in ("true", "1", "yes")
     docs_dir = _HERE / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -2133,11 +1870,6 @@ async def api_info():
 
 @api.post("/ask", summary="Ask the AI a question — returns the full agent response")
 async def api_ask(req: AskRequest):
-    """
-    curl -s -X POST http://localhost:8000/api/ask \\
-         -H 'Content-Type: application/json' \\
-         -d '{"q":"are there any failing pods?"}'
-    """
     if not req.q.strip():
         return _JSONResponse(status_code=400, content={"error": "q must not be empty"})
     logger.info(f"[API] POST /api/ask  q={req.q!r:.120}")
@@ -2156,11 +1888,6 @@ async def api_ask(req: AskRequest):
 
 @api.post("/tool", summary="Call a specific K8s tool directly and get raw output")
 async def api_tool(req: ToolCallRequest):
-    """
-    curl -s -X POST http://localhost:8000/api/tool \\
-         -H 'Content-Type: application/json' \\
-         -d '{"name":"get_node_health","args":{}}'
-    """
     from tools_k8s import K8S_TOOLS
     import asyncio, inspect
 
@@ -2211,10 +1938,6 @@ async def api_tools():
 
 @api.get("/pods", summary="Pod health summary  — ?ns=<namespace>  (default: all)")
 async def api_pods(ns: str = "all"):
-    """
-    curl -s 'http://localhost:8000/api/pods?ns=cdp-drs'
-    curl -s 'http://localhost:8000/api/pods'
-    """
     from tools_k8s import get_pod_status
     import asyncio
     raw = await asyncio.get_event_loop().run_in_executor(
@@ -2223,9 +1946,6 @@ async def api_pods(ns: str = "all"):
 
 @api.get("/pods/raw", summary="kubectl-style pod table — ?ns=<namespace>  (default: all)")
 async def api_pods_raw(ns: str = "all"):
-    """
-    curl -s 'http://localhost:8000/api/pods/raw?ns=longhorn-system'
-    """
     from tools_k8s import get_pod_status
     import asyncio
     raw = await asyncio.get_event_loop().run_in_executor(
@@ -2234,9 +1954,6 @@ async def api_pods_raw(ns: str = "all"):
 
 @api.get("/nodes", summary="Node health including GPU detection")
 async def api_nodes():
-    """
-    curl -s http://localhost:8000/api/nodes
-    """
     from tools_k8s import get_node_health
     import asyncio
     raw = await asyncio.get_event_loop().run_in_executor(None, get_node_health)
@@ -2244,10 +1961,6 @@ async def api_nodes():
 
 @api.get("/events", summary="Cluster events — ?ns=<namespace>&warn=1 for warnings only")
 async def api_events(ns: str = "all", warn: int = 0):
-    """
-    curl -s 'http://localhost:8000/api/events?warn=1'
-    curl -s 'http://localhost:8000/api/events?ns=cdp-drs&warn=0'
-    """
     from tools_k8s import get_events
     import asyncio
     raw = await asyncio.get_event_loop().run_in_executor(
@@ -2256,9 +1969,6 @@ async def api_events(ns: str = "all", warn: int = 0):
 
 @api.get("/deployments", summary="Deployment replica status — ?ns=<namespace>")
 async def api_deployments(ns: str = "all"):
-    """
-    curl -s 'http://localhost:8000/api/deployments?ns=cattle-system'
-    """
     from tools_k8s import get_deployment_status
     import asyncio
     raw = await asyncio.get_event_loop().run_in_executor(
@@ -2267,10 +1977,6 @@ async def api_deployments(ns: str = "all"):
 
 @api.get("/pvcs", summary="PVC / persistent storage status — ?ns=<namespace>")
 async def api_pvcs(ns: str = "all"):
-    """
-    curl -s 'http://localhost:8000/api/pvcs?ns=longhorn-system'
-    curl -s 'http://localhost:8000/api/pvcs'
-    """
     from tools_k8s import get_pvc_status
     import asyncio
     raw = await asyncio.get_event_loop().run_in_executor(
@@ -2279,9 +1985,6 @@ async def api_pvcs(ns: str = "all"):
 
 @api.get("/namespaces", summary="All namespaces and their phase/status")
 async def api_namespaces():
-    """
-    curl -s http://localhost:8000/api/namespaces
-    """
     from tools_k8s import get_namespace_status
     import asyncio
     raw = await asyncio.get_event_loop().run_in_executor(None, get_namespace_status)
@@ -2289,22 +1992,14 @@ async def api_namespaces():
 
 @api.get("/rag/stats", summary="LanceDB document and Excel row statistics")
 async def api_rag_stats():
-    """
-    curl -s http://localhost:8000/api/rag/stats
-    """
     return get_doc_stats()
 
 @api.get("/rag/files", summary="List all ingested files in LanceDB")
 async def api_rag_files():
-    """
-    Returns distinct filenames ingested into both LanceDB tables.
-    curl -s http://localhost:8000/api/rag/files
-    """
     try:
         _, docs_tbl, excel_tbl = _get_lancedb()
         files = []
 
-        # ── Prose docs table ──────────────────────────────────────────────────
         try:
             docs_count = docs_tbl.count_rows()
             if docs_count > 0:
@@ -2322,7 +2017,6 @@ async def api_rag_files():
         except Exception:
             pass
 
-        # ── Excel table ───────────────────────────────────────────────────────
         try:
             excel_count = excel_tbl.count_rows()
             if excel_count > 0:
@@ -2354,16 +2048,9 @@ async def api_rag_files():
 
 @api.get("/rag/query", summary="RAG-only query — no LLM synthesis, returns full untruncated context")
 async def api_rag_query(query: str, top_k: int = 50, sheet: Optional[str] = None):
-    """
-    Used by the ECS Knowledge Bot tab. top_k controls how many rows are retrieved
-    per search pass (unresolved + all). Range: 10–500. Default: 50.
-    Results are not re-capped after dedup, so effective output can be up to 2×top_k.
-
-    curl -s "http://localhost:8000/api/rag/query?query=longhorn+pvc+stuck&top_k=100&sheet=Known+Issues"
-    """
     if not query.strip():
         return {"answer": "", "context": ""}
-    top_k = max(10, min(top_k, 500))   # hard clamp: 10–500
+    top_k = max(10, min(top_k, 500))
     try:
         context = rag_retrieve(query=query, top_k=top_k, sheet=sheet)
         if not context.strip():
@@ -2372,17 +2059,11 @@ async def api_rag_query(query: str, top_k: int = 50, sheet: Optional[str] = None
     except Exception as e:
         return _JSONResponse(status_code=500, content={"error": str(e)})
 
-
 def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: int = 0) -> str:
-    """
-    Call the loaded LLM directly (no agent, no tools) to synthesise an answer
-    from the provided RAG context. Uses whichever backend is loaded (HF or GGUF).
-    Returns the raw answer string.
-    """
     try:
         tok, mdl, is_q3 = globals()["_kb_tokenizer"], globals()["_kb_model"], globals()["_kb_is_qwen3"]
     except KeyError:
-        return context or ""  # LLM not loaded yet — fall back to raw context
+        return context or ""
 
     sys_prompt = (
         "You are the ECS Knowledge Bot for Cloudera ECS (Embedded Container Service) — "
@@ -2422,43 +2103,18 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
             + "Answer using only the context above."
         )
     else:
-        # No RAG results — handle entirely in Python, never let LLM hallucinate
-        _ql = question.lower().strip("?!. ")
-        _words = _ql.split()
 
-        # Rule 1: gibberish / too short
-        if len(_ql) < 4 or (len(_words) == 1 and len(_ql) < 6) or not any(c.isalpha() for c in _ql):
-            return ("Sorry, I didn't quite understand your question. Could you rephrase it? "
-                    "For example: list known issues with Longhorn, what are the prerequisites, "
-                    "what are the dos and don'ts.")
-
-        # Rule 2: identity / greeting — let LLM answer this one
-        _identity_kw = ["who are you", "what are you", "what can you do", "what do you do",
-                        "how are you", "hello", "hi", "hey", "introduce yourself",
-                        "tell me about yourself", "what is this", "help"]
-        if any(_ql == k or _ql.startswith(k) for k in _identity_kw):
-            user_msg = (
-                "Question: " + question + "\n\n"
-                "Respond in 2 sentences: introduce yourself as the ECS Knowledge Bot for Cloudera ECS "
-                "(Embedded Container Service), mention you search a knowledge base of runbooks, known issues, "
-                "prerequisites, dos and don'ts, and past learnings. "
-                "Note that no documents have been ingested yet — direct the user to Settings \u2192 RAG Documents."
-            )
-        else:
-            # Rule 3: everything else with no RAG docs — refuse outright, never hallucinate
-            return ("No results found. Please ensure your RAG documents have been ingested "
-                    "via Settings \u2192 RAG Documents.")
+        user_msg = "Question: " + question
     msgs = [
         {"role": "system", "content": sys_prompt},
         {"role": "user",   "content": user_msg},
     ]
 
-    # Use explicit max_tokens if provided; else scale from top_k
     _max_out = max_tokens if max_tokens > 0 else min(512 + top_k * 16, 4096)
 
     try:
         if tok is None:
-            # GGUF path
+
             resp = mdl.create_chat_completion(
                 messages=msgs,
                 max_tokens=_max_out,
@@ -2468,7 +2124,7 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
             )
             raw = resp["choices"][0]["message"].get("content", "") or ""
         else:
-            # HuggingFace Transformers path
+
             import torch
             kw = {"add_generation_prompt": True}
             if is_q3:
@@ -2486,7 +2142,6 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
                 )
             raw = tok.decode(out[0][ids.shape[-1]:], skip_special_tokens=True)
 
-        # Strip thinking tags if present
         import re as _re
         raw = _re.sub(r'<think>[\s\S]*?</think>\s*', '', raw).strip()
         return raw or context or ""
@@ -2495,31 +2150,20 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
         logger.warning(f"[_llm_synthesise] LLM call failed: {exc} — returning raw context")
         return context or ""
 
-
-
 class KbAskRequest(BaseModel):
     q: str
     top_k: int = 50
-    max_tokens: int = 1312  # default matches top_k=50 scaling
+    max_tokens: int = 1312
     sheet: Optional[str] = None
 
 @api.post("/kb/ask", summary="ECS Knowledge Bot — RAG retrieval, returns formatted context")
 async def api_kb_ask(req: KbAskRequest):
-    """
-    Retrieves relevant context from the LanceDB knowledge base and returns it
-    formatted and ready for display.
-
-    curl -s -X POST http://localhost:8000/api/kb/ask \\
-         -H 'Content-Type: application/json' \\
-         -d '{"q":"list all longhorn known issues","top_k":50}'
-    """
     if not req.q.strip():
         return _JSONResponse(status_code=400, content={"error": "q must not be empty"})
 
     top_k = max(10, min(req.top_k, 500))
     logger.info(f"[API] POST /api/kb/ask  q={req.q!r:.120}  top_k={top_k}")
 
-    # Auto-detect sheet from query if not explicitly provided
     sheet = req.sheet
     if not sheet:
         ql = req.q.lower()
@@ -2546,7 +2190,6 @@ async def api_kb_ask(req: KbAskRequest):
         no_rag = not context.strip() or context == "No relevant documentation found."
         rag_ctx = None if no_rag else context
 
-        # Always call LLM — with context if RAG found results, without if not
         logger.info(f"[API/kb/ask] calling _llm_synthesise (rag_found={not no_rag})")
         answer = await _asyncio.get_event_loop().run_in_executor(
             None, lambda: _llm_synthesise(rag_ctx, req.q, top_k, req.max_tokens)
@@ -2561,10 +2204,6 @@ async def api_kb_ask(req: KbAskRequest):
 
 @api.post("/kb/stream", summary="ECS Knowledge Bot — SSE streaming synthesis")
 async def api_kb_stream(req: KbAskRequest):
-    """
-    SSE streaming version of /api/kb/ask.
-    Emits: status events during RAG+synthesis, then a final result event.
-    """
     import asyncio as _asyncio
     import time as _time
 
@@ -2580,7 +2219,6 @@ async def api_kb_stream(req: KbAskRequest):
 
         top_k = max(10, min(req.top_k, 500))
 
-        # Auto-detect sheet (same logic as /kb/ask)
         sheet = req.sheet
         if not sheet:
             ql = q.lower()
@@ -2623,12 +2261,8 @@ async def api_kb_stream(req: KbAskRequest):
     from fastapi.responses import StreamingResponse as _SR
     return _SR(_generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-
 @api.get("/system", summary="Live CPU / RAM / GPU utilisation metrics")
 async def api_system():
-    """
-    curl -s http://localhost:8000/api/system
-    """
     cpu_per = psutil.cpu_percent(interval=0.2, percpu=True)
     mem     = psutil.virtual_memory()
     freq    = psutil.cpu_freq()
@@ -2647,9 +2281,6 @@ async def api_system():
 
 @api.get("/prompt", summary="Read the current system_prompt.txt contents")
 async def api_get_prompt():
-    """
-    curl -s http://localhost:8000/api/prompt
-    """
     if not _PROMPT_FILE.exists():
         return _JSONResponse(status_code=404, content={"error": "config/system_prompt.txt not found"})
     return {
@@ -2662,14 +2293,6 @@ class PromptUpdateRequest(BaseModel):
 
 @api.put("/prompt", summary="Overwrite system_prompt.txt and hot-reload the agent")
 async def api_put_prompt(req: PromptUpdateRequest):
-    """
-    Update system_prompt.txt in-place and immediately rebuild the agent.
-    The new prompt is active for the very next /api/ask call.
-
-    curl -s -X PUT http://localhost:8000/api/prompt \\
-         -H 'Content-Type: application/json' \\
-         -d '{"content":"You are a K8s expert...\\n{custom_rules}"}'
-    """
     if not req.content.strip():
         return _JSONResponse(status_code=400, content={"error": "content must not be empty"})
     if "{custom_rules}" not in req.content:
@@ -2684,12 +2307,6 @@ async def api_put_prompt(req: PromptUpdateRequest):
 
 @api.post("/reload-prompt", summary="Hot-reload system_prompt.txt without restarting")
 async def api_reload_prompt():
-    """
-    Re-reads system_prompt.txt from disk and clears the agent cache so the
-    next request picks up any manual edits you made to the file.
-
-    curl -s -X POST http://localhost:9000/api/reload-prompt
-    """
     if not _PROMPT_FILE.exists():
         return _JSONResponse(status_code=404, content={"error": "config/system_prompt.txt not found"})
     global _agent
@@ -2698,10 +2315,8 @@ async def api_reload_prompt():
     logger.info(f"[Prompt] Hot-reload triggered via API — {len(text)} chars")
     return {"ok": True, "chars": len(text), "message": "Agent cache cleared. New prompt active on next request."}
 
-
 @api.get("/config", summary="Read runtime configuration (e.g. KUBECTL_MAX_CHARS)")
 async def api_get_config():
-    """Return the current live runtime config values that can be changed without restart."""
     import tools.tools_k8s as _tk
     return {
         "kubectl_max_chars": _tk._KUBECTL_MAX_OUT,
@@ -2709,35 +2324,27 @@ async def api_get_config():
         "llm_timeout":       _LLM_TIMEOUT,
     }
 
-
 @api.post("/config", summary="Update runtime configuration (e.g. KUBECTL_MAX_CHARS)")
 async def api_set_config(body: dict):
-    """
-    Update live config values without restarting the server.
-
-    curl -s -X POST http://localhost:9000/api/config \\
-         -H 'Content-Type: application/json' \\
-         -d '{"kubectl_max_chars": 30000}'
-    """
     import tools.tools_k8s as _tk
     updated = {}
     if "kubectl_max_chars" in body:
         val = int(body["kubectl_max_chars"])
-        val = max(1000, min(val, 200000))   # clamp 1 000 – 200 000
+        val = max(1000, min(val, 200000))
         _tk._KUBECTL_MAX_OUT = val
         updated["kubectl_max_chars"] = val
         logger.info(f"[Config] KUBECTL_MAX_CHARS updated to {val}")
     if "max_new_tokens" in body:
         global _MAX_NEW_TOKENS
         val = int(body["max_new_tokens"])
-        val = max(256, min(val, 16384))     # clamp 256 – 16 384
+        val = max(256, min(val, 16384))
         _MAX_NEW_TOKENS = val
         updated["max_new_tokens"] = val
         logger.info(f"[Config] MAX_NEW_TOKENS updated to {val}")
     if "llm_timeout" in body:
         global _LLM_TIMEOUT
         val = int(body["llm_timeout"])
-        val = max(30, min(val, 1800))       # clamp 30s – 1800s (30 min)
+        val = max(30, min(val, 1800))
         _LLM_TIMEOUT = val
         updated["llm_timeout"] = val
         logger.info(f"[Config] LLM_TIMEOUT updated to {val}s")

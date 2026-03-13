@@ -1,17 +1,5 @@
-"""
-agent/routing.py — Fallback tool routing when the LLM does not select tools.
-
-_default_tools_for() maps a user message to a list of (tool_name, args) pairs
-using keyword matching. It fires when Qwen3 fails to emit a <tool_call> block
-on iteration 1, ensuring the cluster is always queried.
-
-_resolve_namespace() extracts and resolves a namespace from the user message,
-including alias expansion (e.g. "vault" → "vault-system").
-"""
-
 import re
 
-# ── Namespace aliases ─────────────────────────────────────────────────────────
 NS_ALIASES = {
     "vault":    "vault-system",
     "longhorn": "longhorn-system",
@@ -20,12 +8,7 @@ NS_ALIASES = {
     "cert":     "cert-manager",
 }
 
-
 def resolve_namespace(lm: str) -> str:
-    """
-    Extract a namespace from a lowercased user message and resolve known aliases.
-    Returns 'all' if no namespace is found.
-    """
     m = re.search(r'(?:^|\s)(?:in|for|namespace|ns)\s+([a-z0-9-]+)', lm)
     if m:
         raw = m.group(1)
@@ -38,15 +21,7 @@ def resolve_namespace(lm: str) -> str:
 
     return "all"
 
-
 def default_tools_for(user_msg: str) -> list:
-    """
-    Map a user message to a list of (tool_name, args) tuples.
-
-    Called as a fallback when the LLM produces no tool calls on iteration 1.
-    Returns a list so multiple tools can be called in parallel where needed
-    (e.g. RBAC queries call both get_cluster_role_bindings and get_service_accounts).
-    """
     lm = user_msg.lower()
     ns = resolve_namespace(lm)
 
@@ -60,7 +35,6 @@ def default_tools_for(user_msg: str) -> list:
     if _is_howto:
         return [("__conversational__", {})]
 
-    # ── Namespace queries ─────────────────────────────────────────────────────
     is_ns_query = (
         any(k in lm for k in ["how many namespace", "list namespace", "how many ns",
                                "all namespace", "terminating namespace", "namespace phase",
@@ -74,14 +48,12 @@ def default_tools_for(user_msg: str) -> list:
     if is_ns_query:
         return [("get_namespace_status", {})]
 
-    # ── Warning / cluster events ──────────────────────────────────────────────
     if any(k in lm for k in ["warning event", "warn event", "recent event",
                                "fetch event", "cluster event", "critical error",
                                "any event", "show event", "get event",
                                "events across", "events in the cluster"]):
         return [("get_events", {"namespace": ns, "warning_only": True})]
 
-    # ── Pod listing / raw output ──────────────────────────────────────────────
     is_pod_output_query = (
         any(k in lm for k in ["output of", "show me the output", "show output",
                                "display output", "kubectl get pod", "get pods output",
@@ -92,7 +64,6 @@ def default_tools_for(user_msg: str) -> list:
     if is_pod_output_query:
         return [("get_pod_status", {"namespace": ns, "show_all": True, "raw_output": True})]
 
-    # ── Pod count / health / comparison ──────────────────────────────────────
     is_pod_count_query = any(k in lm for k in [
         "how many pod", "list pod", "list all pod", "list pods",
         "pods in", "pod in", "count pod", "failing pod", "unhealthy pod",
@@ -100,7 +71,7 @@ def default_tools_for(user_msg: str) -> list:
         "not running", "not run", "not ready",
         "any pod", "pod.*not", "pod health",
         "all pods", "show pods", "show all pod",
-        # Comparison / ranking queries
+
         "most pod", "most pods", "least pod", "least pods",
         "fewest pod", "fewest pods", "most running", "namespace.*pod",
         "which namespace", "namespace.*most", "namespace.*least",
@@ -115,7 +86,7 @@ def default_tools_for(user_msg: str) -> list:
             "not ready", "any pod",
             "failing", "unhealthy", "crashloop", "oomkill", "crashing",
         ])
-        # Comparison queries always need show_all=True — full counts needed to compare
+
         is_comparison = any(k in lm for k in [
             "most pod", "most pods", "least pod", "least pods",
             "fewest pod", "fewest pods", "which namespace", "most running",
@@ -133,43 +104,31 @@ def default_tools_for(user_msg: str) -> list:
             show = any(k in lm for k in ["how many", "list", "count", "all pod", "all pods"])
         return [("get_pod_status", {"namespace": ns, "show_all": show})]
 
-    # ── Nodes ─────────────────────────────────────────────────────────────────
     if any(k in lm for k in ["node", "pressure", "allocatable", "node metric",
                                "node health", "node status"]):
         return [("get_node_health", {})]
 
-    # ── ReplicaSets ───────────────────────────────────────────────────────────
     if any(k in lm for k in ["replicaset", "replica set", " rs ", "rs in"]):
         return [("kubectl_exec", {"command": f"kubectl get replicasets -n {ns}"})]
 
-    # ── Deployments ───────────────────────────────────────────────────────────
     if any(k in lm for k in ["deployment", "deploy ", "desired replica",
                                "ready replica", "degraded"]):
         return [("get_deployment_status", {"namespace": ns})]
 
-    # ── DaemonSets ────────────────────────────────────────────────────────────
     if any(k in lm for k in ["daemonset", "daemon set", "agent pod", "missing agent",
                                "scheduling health", "ds "]):
         return [("get_daemonset_status", {"namespace": ns})]
 
-    # ── StatefulSets ──────────────────────────────────────────────────────────
     if any(k in lm for k in ["statefulset", "stateful set"]):
         return [("get_statefulset_status", {"namespace": ns})]
 
-    # ── Jobs / CronJobs ───────────────────────────────────────────────────────
     if any(k in lm for k in ["job", "cronjob", "cron job", "batch", "failed job",
                                "failed batch"]):
         return [("get_job_status", {"namespace": ns})]
 
-    # ── HPA ───────────────────────────────────────────────────────────────────
     if any(k in lm for k in ["hpa", "autoscal", "horizontal pod"]):
         return [("get_hpa_status", {"namespace": ns})]
 
-    # ── Persistent Volumes / PVCs ─────────────────────────────────────────────
-    # KEY INSIGHT: get_pvc_status already includes access modes (RWO/RWX).
-    # get_persistent_volumes dumps ALL PVs globally — very large, slow to read.
-    # Only call it when the user explicitly asks for PV-level details
-    # (reclaim policy, cross-namespace PV mapping) rather than access modes.
     is_access_mode_query = any(k in lm for k in [
         "rwo", "rwx", "rox", "rwop", "access mode", "readwriteonce",
         "readwritemany", "storage type", "storage types",
@@ -188,38 +147,32 @@ def default_tools_for(user_msg: str) -> list:
     if is_explicit_pv_query:
         return [("get_persistent_volumes", {})]
 
-    # ── PVCs ──────────────────────────────────────────────────────────────────
     if any(k in lm for k in ["pvc", "persistent volume claim", "volume claim",
                                "storage class", "storage", "vault", "volume",
                                "longhorn volume", "pending pvc", "lost pvc"]):
         return [("get_pvc_status", {"namespace": ns})]
 
-    # ── Services ──────────────────────────────────────────────────────────────
     if any(k in lm for k in ["service", "svc", "pod selector", "clusterip",
                                "nodeport", "loadbalancer", "endpoint"]):
         return [("get_service_status", {"namespace": ns})]
 
-    # ── Ingress ───────────────────────────────────────────────────────────────
     if any(k in lm for k in ["ingress", "load balancer ip", "lb ip", "hostname",
                                "routing rule", "ingressclass"]):
-        # Detect specific ingress name e.g. "cmlwb1/apiv2-ingress" or "apiv2-ingress"
+
         ingress_name = ""
         m = re.search(r'(?:[a-z0-9-]+/)?([a-z0-9][a-z0-9-]*ingress[a-z0-9-]*)', lm)
         if m:
             ingress_name = m.group(1)
         return [("get_ingress_status", {"namespace": ns, "name": ingress_name})]
 
-    # ── Resource Quotas / Limits ──────────────────────────────────────────────
     if any(k in lm for k in ["quota", "resource quota", "limit range", "hard limit",
                                "cpu limit", "memory limit", "resource limit"]):
         return [("get_resource_quotas", {"namespace": ns})]
 
-    # ── RBAC ──────────────────────────────────────────────────────────────────
     if any(k in lm for k in ["rbac", "role binding", "service account",
                                "cluster role", "permission"]):
         return [("get_cluster_role_bindings", {}), ("get_service_accounts", {"namespace": ns})]
 
-    # ── Secrets ───────────────────────────────────────────────────────────────
     _k8s_name_in_query = re.search(r'\b([a-z][a-z0-9]*(?:-[a-z0-9]+){2,})\b', lm)
     _k8s_name_candidate = _k8s_name_in_query.group(1) if _k8s_name_in_query else ""
 
@@ -233,41 +186,30 @@ def default_tools_for(user_msg: str) -> list:
         or len(_k8s_name_candidate) > 8
     )
     if _is_secret_query:
-        # Detect specific secret name — must look like a k8s resource name.
-        # Patterns tried in order:
-        #   1. "secret <name>" or "secret named <name>"
-        #   2. quoted name anywhere
-        #   3. longest hyphenated k8s-style token in the message
+
         _stopwords = {"in", "for", "the", "all", "from", "with", "that", "has",
                       "any", "which", "what", "show", "list", "get", "cdp",
                       "namespace", "tls", "ssl", "secret", "secrets",
                       "me", "please", "display", "fetch", "find", "give"}
         secret_name = ""
 
-        # Pattern 1: explicit "secret <name>"
         m = re.search(r'secret\s+(?:named?\s+|called?\s+)?["\']?([a-z0-9][a-z0-9._-]{2,})["\']?', lm)
         if m and m.group(1) not in _stopwords:
             secret_name = m.group(1)
 
-        # Pattern 2: quoted name anywhere
         if not secret_name:
             m = re.search(r"""["']([a-z0-9][a-z0-9._-]{2,})["']""", lm)
             if m and m.group(1) not in _stopwords:
                 secret_name = m.group(1)
 
-        # Pattern 3: longest hyphenated k8s-style name in the query (>=3 hyphens = likely a resource name)
         if not secret_name:
             candidates = re.findall(r'\b([a-z][a-z0-9]*(?:-[a-z0-9]+){2,})\b', lm)
-            # Pick the longest one that's not a stopword and has enough hyphens to be a resource name
+
             for c in sorted(candidates, key=len, reverse=True):
                 if c not in _stopwords and c.count('-') >= 2 and len(c) > 8:
                     secret_name = c
                     break
 
-        # decode flag: controlled entirely by the UI Security toggle.
-        # _wants_decode is only a fallback if the ContextVar can't be read
-        # (e.g. unit tests / direct invocation outside the HTTP request context).
-        # It must NOT override an explicit toggle-off from the user.
         _wants_decode = any(k in lm for k in [
             "username", "password", "credential", "show me", "display", "decode", "value",
         ])
@@ -316,13 +258,9 @@ def default_tools_for(user_msg: str) -> list:
             f"[routing] secret query → get_secrets(name={secret_name!r}, decode={decode})")
         return [("get_secrets", {"namespace": ns, "name": secret_name, "decode": decode})]
 
-    # ── ConfigMaps ────────────────────────────────────────────────────────────
     if any(k in lm for k in ["configmap", "config map"]):
         return [("get_configmap_list", {"namespace": ns})]
 
-    # ── DB / SQL queries ──────────────────────────────────────────────────────
-    # Must be checked BEFORE the cluster health fallback — "access database",
-    # "sql tables", "how many tables" etc. must never fall through to health check.
     _is_db_query = any(k in lm for k in [
         "sql", "database", "db-", " db ", "db pod",
         "access db", "access database", "query db", "query database",
@@ -333,15 +271,13 @@ def default_tools_for(user_msg: str) -> list:
         "check table", "find table", "tables in",
     ])
     if _is_db_query:
-        # Extract pod name hint (e.g. "db-0", "model-metrics-db-0")
+
         pod_hint = ""
         m = re.search(r'\b([a-z0-9][a-z0-9-]*db[a-z0-9-]*-\d+|db-\d+)\b', lm)
         if m:
             pod_hint = m.group(1)
         return [("exec_db_query", {"namespace": ns, "pod_name": pod_hint, "sql": "SHOW TABLES"})]
-    # Broad questions about overall cluster health fire ALL health tools so the
-    # LLM can give a comprehensive assessment across nodes, pods, deployments,
-    # PVCs, and recent warning events.
+
     _is_cluster_health = any(k in lm for k in [
         "cluster having issue", "cluster ok", "cluster healthy", "cluster health",
         "cluster status", "cluster doing", "anything wrong", "any issue",
@@ -359,5 +295,4 @@ def default_tools_for(user_msg: str) -> list:
             ("get_events",             {"namespace": "all", "warning_only": True}),
         ]
 
-    # ── Default: cluster-wide health ──────────────────────────────────────────
     return [("get_node_health", {}), ("get_pod_status", {"namespace": ns, "show_all": False})]

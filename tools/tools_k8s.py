@@ -11,7 +11,6 @@ from kubernetes.client.rest import ApiException
 
 _log = logging.getLogger("k8s")
 
-
 def _load_k8s():
     kc = os.getenv("KUBECONFIG_PATH", "")
     try:
@@ -25,7 +24,6 @@ def _load_k8s():
         _log.error(f"K8s config failed: {e}")
         raise RuntimeError(f"K8s config: {e}")
 
-
 _load_k8s()
 
 _core   = _k8s.CoreV1Api()
@@ -35,13 +33,7 @@ _rbac   = _k8s.RbacAuthorizationV1Api()
 _net    = _k8s.NetworkingV1Api()
 _autoscaling = _k8s.AutoscalingV2Api()
 
-
 def reload_kubeconfig(yaml_content: str) -> dict:
-    """
-    Load a kubeconfig from a YAML string, write it to a temp file, re-initialise
-    all Kubernetes API clients, and return {"ok": True, "server": "<host:port>"}.
-    Raises ValueError with a human-readable message on failure.
-    """
     import tempfile, re as _re
     global _core, _apps, _batch, _rbac, _net, _autoscaling
 
@@ -76,21 +68,7 @@ def reload_kubeconfig(yaml_content: str) -> dict:
     _log.info(f"[kubeconfig] Reloaded — server={server_url}")
     return {"ok": True, "server": server_url or "unknown"}
 
-
-
-
 def _is_high_restart(pod, restart_count: int) -> bool:
-    """
-    Return True only if the pod's restarts indicate a CURRENT problem.
-
-    Two-stage check:
-    1. Recency: if the last restart was > 1 day ago the pod has stabilised —
-       do NOT flag it regardless of total count. Old history is not a current issue.
-    2. Rate (for recent restarts): flag only if rate > 3 restarts/day in the
-       current run window.
-
-    Hard floor: always flag if restart_count > 100 (catastrophic history).
-    """
     import datetime as _dt
 
     if restart_count == 0:
@@ -100,7 +78,6 @@ def _is_high_restart(pod, restart_count: int) -> bool:
 
     now = _dt.datetime.now(_dt.timezone.utc)
 
-    # last_state.terminated.finished_at is the most reliable indicator.
     last_restart_time = None
     for cs in (pod.status.container_statuses or []):
         if cs.last_state and cs.last_state.terminated:
@@ -112,7 +89,7 @@ def _is_high_restart(pod, restart_count: int) -> bool:
     if last_restart_time is not None:
         hours_since_last = (now - last_restart_time).total_seconds() / 3600
         if hours_since_last > 24:
-            return False   # stable — last restart was old history, not current
+            return False
 
     run_start = None
     for cs in (pod.status.container_statuses or []):
@@ -130,23 +107,7 @@ def _is_high_restart(pod, restart_count: int) -> bool:
     run_days = max((now - run_start).total_seconds() / 86400, 0.1)
     return (restart_count / run_days) > 3.0
 
-
 def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: bool = False, phase_only: bool = False) -> str:
-    """
-    List pods in a namespace.
-
-    show_all=False (default, health-check mode):
-      Uses a field selector to fetch ONLY non-Running pods from the API — fast
-      even on large clusters because it never transfers healthy pods over the wire.
-
-    show_all=True (listing/count mode):
-      - namespace-scoped: lists every pod individually.
-      - namespace="all": grouped summary (healthy count per namespace) + full
-        detail for unhealthy pods. Avoids dumping thousands of lines.
-
-    raw_output=True: kubectl-style tabular format. Only use when user explicitly
-    asks to "show" or "display" pod output.
-    """
     try:
         if namespace != "all":
             try:
@@ -157,8 +118,6 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                             f"Cannot report pod count for a non-existent namespace.")
                 raise
 
-        # ── Health-check / phase-only mode ──────────────────────────────────
-        #                    or have high recent restarts (unhealthy-but-running)
         if not show_all and not raw_output:
             non_running_phases = []
             for phase in ("Pending", "Failed", "Unknown"):
@@ -217,15 +176,10 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                     + (f" [{', '.join(bad)}]" if bad else ""))
             return "\n".join(out_lines)
 
-
-        # ── show_all=True all-namespace: paginated field-selector approach ────
-        # Fetch Running pods in pages of 100 to avoid one giant API call.
-        # Non-Running pods (Pending/Failed/Unknown) are few — fetch all at once.
         if show_all and not raw_output and namespace == "all":
             unhealthy = []
             healthy_by_ns: dict = {}
 
-            # Non-Running phases — typically very few pods, fast
             for phase in ("Pending", "Failed", "Unknown"):
                 try:
                     result = _core.list_pod_for_all_namespaces(
@@ -243,7 +197,6 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                 except ApiException:
                     pass
 
-            # Running pods — paginate in batches of 100 to reduce per-call payload
             _cont = None
             while True:
                 try:
@@ -284,7 +237,6 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
                 lines.append(f"  {ns_key}: {count} pod(s)")
             return "\n".join(lines)
 
-        # ── Full fetch for namespace-scoped show_all or raw_output ────────────
         pods = (_core.list_pod_for_all_namespaces() if namespace == "all"
                 else _core.list_namespaced_pod(namespace=namespace))
 
@@ -324,7 +276,6 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
             rows.append(f"\nTotal: {total} pod(s) in namespace '{namespace}'.")
             return "\n".join(rows)
 
-        # Namespace-scoped listing — every pod individually
         lines = [f"Pods in '{namespace}': {total} total."]
         for pod in pods.items:
             phase    = pod.status.phase or "Unknown"
@@ -342,7 +293,6 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_pod_logs(pod_name: str, namespace: str = "default",
                  tail_lines: int = 50) -> str:
     tail_lines = min(tail_lines, 100)
@@ -356,9 +306,8 @@ def get_pod_logs(pod_name: str, namespace: str = "default",
         return (f"Pod '{pod_name}' not found."
                 if e.status == 404 else f"K8s error: {e.reason}")
 
-
 def describe_pod(pod_name: str, namespace: str = "default") -> str:
-    # Strip accidental "namespace/podname" format the LLM sometimes passes
+
     if "/" in pod_name:
         parts = pod_name.split("/", 1)
         if len(parts) == 2:
@@ -396,16 +345,12 @@ def describe_pod(pod_name: str, namespace: str = "default") -> str:
         return (f"Pod '{pod_name}' not found."
                 if e.status == 404 else f"K8s error: {e.reason}")
 
-
 def get_node_health() -> str:
     try:
         nodes = _core.list_node()
         if not nodes.items:
             return "No nodes found."
 
-        # Build a map of GPU requests per node from running pods.
-        # This is the only reliable way to know how many GPUs are in use
-        # without requiring the metrics-server (kubectl top).
         gpu_used_by_node: dict = {}
         try:
             all_pods = _core.list_pod_for_all_namespaces(
@@ -424,7 +369,7 @@ def get_node_health() -> str:
                             except (ValueError, TypeError):
                                 pass
         except Exception:
-            pass  # pod scan is best-effort — degrade gracefully
+            pass
 
         lines      = ["Node health:"]
         gpu_nodes  = 0
@@ -468,9 +413,7 @@ def get_node_health() -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_gpu_info() -> str:
-    """Return detailed GPU model/spec info from node labels and capacity."""
     try:
         nodes = _core.list_node()
         if not nodes.items:
@@ -482,7 +425,6 @@ def get_gpu_info() -> str:
             capacity = node.status.capacity or {}
             alloc    = node.status.allocatable or {}
 
-            # Count allocatable GPUs from capacity keys
             gpu_cap   = {}
             gpu_alloc = {}
             for key, val in capacity.items():
@@ -496,11 +438,10 @@ def get_gpu_info() -> str:
                 k.startswith("nvidia.com/") or k.startswith("amd.com/")
                 for k in labels
             ):
-                continue  # no GPU on this node
+                continue
 
             info = [f"Node: {node.metadata.name}"]
 
-            # nvidia-device-plugin / gpu-feature-discovery labels
             nvidia_label_prefixes = [
                 "nvidia.com/gpu.product",
                 "nvidia.com/gpu.memory",
@@ -509,7 +450,7 @@ def get_gpu_info() -> str:
                 "nvidia.com/gpu.machine",
                 "nvidia.com/cuda.driver.major",
                 "nvidia.com/cuda.runtime.major",
-                "feature.node.kubernetes.io/pci-10de",   # NVIDIA PCI
+                "feature.node.kubernetes.io/pci-10de",
                 "nvidia.com/mig.strategy",
             ]
             for prefix in nvidia_label_prefixes:
@@ -517,12 +458,10 @@ def get_gpu_info() -> str:
                     if k == prefix or k.startswith(prefix):
                         info.append(f"  {k}: {v}")
 
-            # AMD equivalents
             for k, v in labels.items():
                 if k.startswith("amd.com/gpu"):
                     info.append(f"  {k}: {v}")
 
-            # Capacity and allocatable
             for k, v in gpu_cap.items():
                 info.append(f"  capacity[{k}]: {v}")
             for k, v in gpu_alloc.items():
@@ -541,7 +480,6 @@ def get_gpu_info() -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 _EVENT_NOISE_PATTERNS = [
     "cgroup",
     "cgroupv",
@@ -550,10 +488,8 @@ _EVENT_NOISE_PATTERNS = [
 ]
 
 def _is_noisy_event(message: str) -> bool:
-    """Return True if the event message is known background noise."""
     msg_lower = (message or "").lower()
     return any(pat in msg_lower for pat in _EVENT_NOISE_PATTERNS)
-
 
 def get_events(namespace: str = "all", warning_only: bool = True) -> str:
     try:
@@ -591,7 +527,6 @@ def get_events(namespace: str = "all", warning_only: bool = True) -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_deployment_status(namespace: str = "all") -> str:
     try:
         deps = (_apps.list_deployment_for_all_namespaces()
@@ -611,7 +546,6 @@ def get_deployment_status(namespace: str = "all") -> str:
         return "\n".join(lines)
     except ApiException as e:
         return f"K8s API error: {e.reason}"
-
 
 def get_daemonset_status(namespace: str = "all") -> str:
     try:
@@ -633,7 +567,6 @@ def get_daemonset_status(namespace: str = "all") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_statefulset_status(namespace: str = "all") -> str:
     try:
         sts = (_apps.list_stateful_set_for_all_namespaces()
@@ -652,7 +585,6 @@ def get_statefulset_status(namespace: str = "all") -> str:
         return "\n".join(lines)
     except ApiException as e:
         return f"K8s API error: {e.reason}"
-
 
 def get_job_status(namespace: str = "all") -> str:
     try:
@@ -676,9 +608,7 @@ def get_job_status(namespace: str = "all") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_hpa_status(namespace: str = "all") -> str:
-    """Check HorizontalPodAutoscaler targets and current replica counts."""
     try:
         hpas = (_autoscaling.list_horizontal_pod_autoscaler_for_all_namespaces()
                 if namespace == "all"
@@ -701,18 +631,7 @@ def get_hpa_status(namespace: str = "all") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_pvc_status(namespace: str = "all", detail: bool = False) -> str:
-    """Check PersistentVolumeClaims.
-
-    For a specific namespace:
-      - detail=False (default): grouped summary by access mode + storage class,
-        plus full detail for any non-Bound PVCs. Concise for large namespaces.
-      - detail=True: every PVC listed individually (use only when asked about
-        a specific workload's PVC).
-    For namespace="all": summary count + access-mode breakdown + non-Bound detail.
-    Access modes (RWO/RWX/ROX) are included in all output.
-    """
     _AM = {"ReadWriteOnce": "RWO", "ReadWriteMany": "RWX", "ReadOnlyMany": "ROX",
            "ReadWriteOncePod": "RWOP"}
 
@@ -771,7 +690,7 @@ def get_pvc_status(namespace: str = "all", detail: bool = False) -> str:
 
         bound_by_am: dict = {}
         non_bound = []
-        by_ns_am: dict = {}          # {namespace: {"RWO": n, "RWX": n, ...}}
+        by_ns_am: dict = {}
         for pvc in pvcs.items:
             phase = pvc.status.phase or "Unknown"
             sc    = pvc.spec.storage_class_name or "default"
@@ -781,7 +700,7 @@ def get_pvc_status(namespace: str = "all", detail: bool = False) -> str:
             if phase == "Bound":
                 key = f"{am} ({sc})"
                 bound_by_am[key] = bound_by_am.get(key, 0) + 1
-                # Per-namespace per-access-mode count
+
                 ns_entry = by_ns_am.setdefault(ns_name, {})
                 for mode in (pvc.spec.access_modes or []):
                     short = _AM.get(mode, mode)
@@ -798,10 +717,9 @@ def get_pvc_status(namespace: str = "all", detail: bool = False) -> str:
             for k, count in sorted(bound_by_am.items()):
                 lines.append(f"  {k}: {count} PVC(s)")
 
-        # Per-namespace breakdown — essential for "which namespace has most RWO/RWX" queries
         if by_ns_am:
             lines.append("\nBound PVCs per namespace by access mode:")
-            # Sort namespaces by total PVC count descending for easy scanning
+
             for ns_name in sorted(by_ns_am, key=lambda n: -sum(by_ns_am[n].values())):
                 counts = by_ns_am[ns_name]
                 summary = "  ".join(f"{am}:{n}" for am, n in sorted(counts.items()))
@@ -814,9 +732,7 @@ def get_pvc_status(namespace: str = "all", detail: bool = False) -> str:
     except ApiException as e:
         return f"K8s API error (PVC listing): {e.reason}"
 
-
 def get_persistent_volumes() -> str:
-    """List all PersistentVolumes with phase, capacity, access mode, reclaim policy and bound claim."""
     _AM = {"ReadWriteOnce": "RWO", "ReadWriteMany": "RWX", "ReadOnlyMany": "ROX",
            "ReadWriteOncePod": "RWOP"}
     try:
@@ -840,9 +756,7 @@ def get_persistent_volumes() -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_service_status(namespace: str = "all") -> str:
-    """List Services — highlights those with no endpoints (potential misconfigs)."""
     try:
         svcs = (_core.list_service_for_all_namespaces()
                 if namespace == "all"
@@ -863,28 +777,19 @@ def get_service_status(namespace: str = "all") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
-
-
 def get_ingress_status(namespace: str = "all", name: str = "",
                        port: int = 0) -> str:
-    """
-    List ingresses, find by hostname (FQDN), exact name, or filter by port (e.g. 443).
-    When name contains dots it is treated as a hostname and ALL namespaces are searched.
-    When port is set (e.g. 443), only ingresses that expose that port are returned.
-    """
     def _get_ports(ing) -> list:
-        """Extract all ports exposed by an ingress (from TLS and service backends)."""
         ports = set()
-        # TLS presence implies 443
+
         if ing.spec.tls:
             ports.add(443)
-        # Annotations may declare ssl-redirect or force-ssl
+
         ann = ing.metadata.annotations or {}
         for v in ann.values():
             if "443" in str(v):
                 ports.add(443)
-        # Backend service ports
+
         for rule in (ing.spec.rules or []):
             if rule.http:
                 for path in (rule.http.paths or []):
@@ -892,7 +797,7 @@ def get_ingress_status(namespace: str = "all", name: str = "",
                     p = svc.port.number if svc.port.number else None
                     if p:
                         ports.add(p)
-        # If no explicit service port found, assume 80
+
         if not ports:
             ports.add(80)
         return sorted(ports)
@@ -938,7 +843,6 @@ def get_ingress_status(namespace: str = "all", name: str = "",
         all_ings = _net.list_ingress_for_all_namespaces()
         pool = all_ings.items
 
-        # ── Port filter ───────────────────────────────────────────────────────
         if port:
             pool = [ing for ing in pool if port in _get_ports(ing)]
             if not pool:
@@ -953,7 +857,7 @@ def get_ingress_status(namespace: str = "all", name: str = "",
             return "\n".join(out)
 
         if name:
-            # ── Hostname search (name contains dots → treat as FQDN) ──────────
+
             if "." in name:
                 host_lower = name.lower()
                 matches = []
@@ -969,7 +873,6 @@ def get_ingress_status(namespace: str = "all", name: str = "",
                     )
                 return "\n\n".join(_fmt(ing) for ing in matches)
 
-            # ── Exact ingress name search ─────────────────────────────────────
             if namespace != "all":
                 try:
                     ing = _net.read_namespaced_ingress(name=name, namespace=namespace)
@@ -984,7 +887,6 @@ def get_ingress_status(namespace: str = "all", name: str = "",
                     return f"Ingress '{name}' not found in any namespace."
                 return "\n\n".join(_fmt(ing) for ing in matches)
 
-        # ── List ingresses (namespace filter) ─────────────────────────────────
         if namespace != "all":
             pool = [i for i in pool if i.metadata.namespace == namespace]
         if not pool:
@@ -1005,12 +907,7 @@ def get_ingress_status(namespace: str = "all", name: str = "",
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_configmap_list(namespace: str = "default", filter_keys: list = None) -> str:
-    """List ConfigMaps in a namespace (excludes kube-system defaults).
-    Keys that look like certificates or CA bundles are flagged with [cert].
-    When filter_keys is set, only configmaps containing at least one matching
-    key are returned — keeps output small for targeted searches."""
     _CERT_KEY_HINTS = {"ca.crt", "tls.crt", "tls.key", "ca-bundle", "ca-certificates",
                        "ca.pem", "cert.pem", "certificate", "ssl.crt", "ssl.key"}
     try:
@@ -1020,7 +917,6 @@ def get_configmap_list(namespace: str = "default", filter_keys: list = None) -> 
         if not items:
             return f"No ConfigMaps in '{namespace}'."
 
-        # ── Filtered search ───────────────────────────────────────────────────
         if filter_keys:
             _fk_lower = [f.lower() for f in filter_keys]
             matches = []
@@ -1041,7 +937,6 @@ def get_configmap_list(namespace: str = "default", filter_keys: list = None) -> 
                     lines.append(f"    {k}: {data[k]}")
             return "\n".join(lines)
 
-        # ── Full listing ──────────────────────────────────────────────────────
         lines = [f"ConfigMaps in '{namespace}':"]
         for cm in items:
             keys = list((cm.data or {}).keys())
@@ -1054,17 +949,8 @@ def get_configmap_list(namespace: str = "default", filter_keys: list = None) -> 
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_secrets(namespace: str = "default", name: str = "",
                 decode: bool = False, filter_keys: list = None) -> str:
-    """
-    List secrets in a namespace, or return decoded values for a specific secret.
-    When decode=True all base64 values are decoded and shown.
-    When decode=False all values are hidden (keys shown only).
-    When filter_keys is set, only secrets containing at least one of those keys
-    are returned, with matching key values decoded — useful for credential searches
-    without dumping every secret in a large namespace (avoids LLM timeout).
-    """
     import base64 as _b64
 
     def _decode(val: str) -> str:
@@ -1074,7 +960,7 @@ def get_secrets(namespace: str = "default", name: str = "",
             return "<decode error>"
 
     try:
-        # ── Single secret detail ──────────────────────────────────────────────
+
         if name:
             try:
                 secret = _core.read_namespaced_secret(name=name, namespace=namespace)
@@ -1100,18 +986,13 @@ def get_secrets(namespace: str = "default", name: str = "",
                     lines.append(f"    {k}: {v}")
             return "\n".join(lines)
 
-        # ── Filtered search: find secrets by key name pattern ─────────────────
-        # Used for credential/cert queries — only returns secrets that contain
-        # at least one of the requested key patterns, with values decoded.
-        # This keeps the output tiny regardless of namespace size.
         if filter_keys:
             import logging as _flog
             _flog.getLogger("tools.k8s").debug(
                 f"[get_secrets] ENTRY filter_keys={filter_keys}  decode={decode}  namespace={namespace}")
             _fk_lower = [f.lower() for f in filter_keys]
             secrets = _core.list_namespaced_secret(namespace=namespace)
-            # First pass: find matching secret names using key names from list response
-            # (list response has key names but values are None — fetch individually if decode needed)
+
             candidate_names = []
             for s in secrets.items:
                 data = s.data or {}
@@ -1128,7 +1009,7 @@ def get_secrets(namespace: str = "default", name: str = "",
             for sname, stype, hit_keys in sorted(candidate_names):
                 lines.append(f"  {sname} [type={stype}]:")
                 if decode:
-                    # Fetch the full secret to get actual values
+
                     try:
                         full = _core.read_namespaced_secret(name=sname, namespace=namespace)
                         full_data = full.data or {}
@@ -1144,7 +1025,6 @@ def get_secrets(namespace: str = "default", name: str = "",
                     lines.append("    ❗ Secret values are hidden — enable 'Show Secret Values' in ⚙ Settings → Security to decode.")
             return "\n".join(lines)
 
-        # ── Namespace listing ─────────────────────────────────────────────────
         secrets = _core.list_namespaced_secret(namespace=namespace)
         if not secrets.items:
             return f"No secrets in namespace '{namespace}'."
@@ -1156,9 +1036,9 @@ def get_secrets(namespace: str = "default", name: str = "",
         by_type: dict = {}
         for s in secrets.items:
             t = s.type or "Opaque"
-            # data keys are already present on the list response — no extra API call needed
+
             keys = list((s.data or {}).keys())
-            # Flag secrets that are certificates or contain cert-like keys
+
             is_cert = (t in _CERT_TYPES
                        or any(k in _CERT_KEY_HINTS for k in keys)
                        or any(h in k.lower() for k in keys
@@ -1176,9 +1056,7 @@ def get_secrets(namespace: str = "default", name: str = "",
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_resource_quotas(namespace: str = "all") -> str:
-    """Check ResourceQuotas — highlights namespaces near their limits."""
     try:
         quotas = (_core.list_resource_quota_for_all_namespaces()
                   if namespace == "all"
@@ -1196,7 +1074,6 @@ def get_resource_quotas(namespace: str = "all") -> str:
         return "\n".join(lines)
     except ApiException as e:
         return f"K8s API error: {e.reason}"
-
 
 def get_limit_ranges(namespace: str = "all") -> str:
     try:
@@ -1216,7 +1093,6 @@ def get_limit_ranges(namespace: str = "all") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_service_accounts(namespace: str = "default") -> str:
     try:
         sas = _core.list_namespaced_service_account(namespace=namespace)
@@ -1230,9 +1106,7 @@ def get_service_accounts(namespace: str = "default") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_cluster_role_bindings() -> str:
-    """List ClusterRoleBindings — useful for auditing broad permissions."""
     try:
         crbs = _rbac.list_cluster_role_binding()
         if not crbs.items:
@@ -1246,10 +1120,7 @@ def get_cluster_role_bindings() -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-
 def get_namespace_status() -> str:
-    """List ALL namespaces with their pod count — uses the Python k8s client directly against the
-    remote cluster API server. No local kubectl binary required."""
     try:
         items, _cont = [], None
         while True:
@@ -1265,7 +1136,6 @@ def get_namespace_status() -> str:
         if not items:
             return "No namespaces found."
 
-        # Fetch pod counts per namespace in one call per namespace
         ns_pod_counts: dict = {}
         for ns in items:
             ns_name = ns.metadata.name
@@ -1289,19 +1159,9 @@ def get_namespace_status() -> str:
     except ApiException as e:
         return f"[ERROR] K8s API error listing namespaces: {e.reason}"
 
-
 _KUBECTL_MAX_OUT  = int(os.getenv("KUBECTL_MAX_CHARS", "20000"))
 
-
 def _safe_reason(e) -> str:
-    """
-    Return a clean, single-line error string from an ApiException.
-
-    ApiException.reason is usually a short string like "Internal Server Error".
-    str(e) / e.body can contain multi-line JSON blobs that the LLM echoes back
-    verbatim, producing garbled output. We always use e.reason (or a fallback)
-    and never expose e.body to the LLM.
-    """
     try:
         reason = getattr(e, "reason", None) or ""
         status = getattr(e, "status", 0)
@@ -1329,14 +1189,7 @@ _BLOCKED_VERBS = {
     "proxy": "proxy is not supported",
 }
 
-
 def _get_resource_fns(resource: str):
-    """
-    Return (list_all_fn, list_ns_fn, get_fn, kind_label) for a resource type.
-    list_all_fn(field_selector) -> items list across all namespaces
-    list_ns_fn(namespace, field_selector) -> items list in one namespace
-    get_fn(name, namespace) -> single object
-    """
     r = resource.lower()
     if r in ("pod", "pods", "po"):
         return (
@@ -1505,9 +1358,7 @@ def _get_resource_fns(resource: str):
         )
     return None
 
-
 def _paginate(list_fn, *args, field_selector="", **kwargs):
-    """Call list_fn with automatic pagination, return all items."""
     items, _cont = [], None
     while True:
         kw = {"limit": 500, **kwargs}
@@ -1526,9 +1377,7 @@ def _paginate(list_fn, *args, field_selector="", **kwargs):
             break
     return items
 
-
 def _resolve_crd_version(group: str, plural: str) -> str:
-    """Look up the stored version for a CRD from the API server."""
     try:
         ext = _k8s.ApiextensionsV1Api()
         crd = ext.read_custom_resource_definition(f"{plural}.{group}")
@@ -1539,7 +1388,6 @@ def _resolve_crd_version(group: str, plural: str) -> str:
     except Exception:
         return "v1"
 
-
 def _list_custom_all(plural: str, group: str, version: str) -> list:
     custom = _k8s.CustomObjectsApi()
     try:
@@ -1547,7 +1395,6 @@ def _list_custom_all(plural: str, group: str, version: str) -> list:
         return resp.get("items", [])
     except Exception:
         return []
-
 
 def _list_custom_ns(ns: str, plural: str, group: str, version: str) -> list:
     custom = _k8s.CustomObjectsApi()
@@ -1557,21 +1404,13 @@ def _list_custom_ns(ns: str, plural: str, group: str, version: str) -> list:
     except Exception:
         return []
 
-
 def _get_custom(name: str, ns: str, plural: str, group: str, version: str) -> dict:
     custom = _k8s.CustomObjectsApi()
     if ns:
         return custom.get_namespaced_custom_object(group, version, ns, plural, name)
     return custom.get_cluster_custom_object(group, version, plural, name)
 
-
 def _parse_kubectl(command: str) -> dict:
-    """
-    Parse a kubectl command string into a structured dict.
-    Returns keys: verb, resource, name, namespace, all_namespaces,
-                  output_format, field_selector, tail, container,
-                  subcommand, args, flags
-    """
     tokens = shlex.split(command.strip())
     if tokens and tokens[0] == "kubectl":
         tokens = tokens[1:]
@@ -1644,7 +1483,6 @@ def _parse_kubectl(command: str) -> dict:
             result["subcommand"] = positional[2]
     return result
 
-
 def _fmt_pod(p) -> str:
     ns   = p.metadata.namespace or ""
     name = p.metadata.name
@@ -1659,7 +1497,6 @@ def _fmt_pod(p) -> str:
         return f"{ns:<30} {name:<50} {ready}/{total}  {restarts:<6} {phase:<12} {node:<30} {age}"
     return f"{name:<50} {ready}/{total}  {restarts:<6} {phase:<12} {node:<30} {age}"
 
-
 def _fmt_node(n) -> str:
     name  = n.metadata.name
     role  = ",".join(k.split("/")[-1] for k in (n.metadata.labels or {})
@@ -1669,7 +1506,6 @@ def _fmt_node(n) -> str:
     age   = _age(n.metadata.creation_timestamp)
     ver   = n.status.node_info.kubelet_version if n.status and n.status.node_info else ""
     return f"{name:<40} {role:<20} {ready:<10} {age:<10} {ver}"
-
 
 def _fmt_deployment(d) -> str:
     ns    = d.metadata.namespace or ""
@@ -1681,7 +1517,6 @@ def _fmt_deployment(d) -> str:
     if ns:
         return f"{ns:<30} {name:<50} {ready_r}/{desired}  available={available}  {age}"
     return f"{name:<50} {ready_r}/{desired}  available={available}  {age}"
-
 
 def _age(ts) -> str:
     if not ts:
@@ -1698,18 +1533,14 @@ def _age(ts) -> str:
     except Exception:
         return "<unknown>"
 
-
 def _obj_to_yaml(obj) -> str:
-    """Convert a kubernetes client object to a YAML string."""
     try:
         d = _k8s.ApiClient().sanitize_for_serialization(obj)
         return _yaml.dump(d, default_flow_style=False, allow_unicode=True)
     except Exception:
         return str(obj)
 
-
 def _obj_to_table(items, kind: str) -> str:
-    """Format a list of k8s objects into a human-readable table."""
     if not items:
         return f"No {kind} resources found."
     lines = []
@@ -1756,9 +1587,7 @@ def _obj_to_table(items, kind: str) -> str:
                 lines.append(f"  {item.metadata.name:<50} {_age(item.metadata.creation_timestamp)}")
     return "\n".join(lines)
 
-
 def _custom_to_table(items: list, kind: str) -> str:
-    """Format a list of custom resource dicts into a table."""
     if not items:
         return f"No {kind} resources found."
     lines = []
@@ -1789,7 +1618,6 @@ def _custom_to_table(items: list, kind: str) -> str:
             meta = item.get("metadata", {})
             lines.append(f"  {meta.get('name', ''):<50} <n/a>")
     return "\n".join(lines)
-
 
 def _handle_get(p: dict) -> str:
     resource = p["resource"]
@@ -1834,7 +1662,6 @@ def _handle_get(p: dict) -> str:
     except ApiException as e:
         return f"[ERROR] API error getting {resource}: {_safe_reason(e)}"
 
-
 def _handle_describe(p: dict) -> str:
     resource = p["resource"]
     name     = p["name"]
@@ -1850,7 +1677,6 @@ def _handle_describe(p: dict) -> str:
         return _obj_to_yaml(obj)
     except ApiException as e:
         return f"[ERROR] API error describing {resource}/{name}: {e.reason}"
-
 
 def _handle_logs(p: dict) -> str:
     pod_ref = p["resource"]
@@ -1869,7 +1695,6 @@ def _handle_logs(p: dict) -> str:
         return logs or "(empty log)"
     except ApiException as e:
         return f"[ERROR] Cannot get logs for {pod_name} in {ns}: {e.reason}"
-
 
 def _handle_top(p: dict) -> str:
     resource = p["resource"]
@@ -1917,7 +1742,6 @@ def _handle_top(p: dict) -> str:
     except ApiException as e:
         return f"[ERROR] Metrics not available: {e.reason}. Is metrics-server installed?"
 
-
 def _handle_rollout(p: dict) -> str:
     subverb  = p["args"][1] if len(p["args"]) > 1 else p["subcommand"]
     ref      = p["args"][2] if len(p["args"]) > 2 else ""
@@ -1951,7 +1775,6 @@ def _handle_rollout(p: dict) -> str:
     except ApiException as e:
         return f"[ERROR] rollout {subverb} {name}: {e.reason}"
 
-
 def _handle_auth_cani(p: dict) -> str:
     args = p["args"]
     if len(args) < 3:
@@ -1975,7 +1798,6 @@ def _handle_auth_cani(p: dict) -> str:
     except ApiException as e:
         return f"[ERROR] auth can-i failed: {e.reason}"
 
-
 def _handle_api_resources() -> str:
     try:
         api_client = _k8s.ApiClient()
@@ -1994,7 +1816,6 @@ def _handle_api_resources() -> str:
     except Exception as e:
         return f"[ERROR] api-resources: {e}"
 
-
 def _handle_version() -> str:
     try:
         v = _k8s.VersionApi().get_code()
@@ -2006,35 +1827,7 @@ def _handle_version() -> str:
     except ApiException as e:
         return f"[ERROR] version: {e.reason}"
 
-
 def kubectl_exec(command: str) -> str:
-    """
-    Execute a kubectl command against the remote cluster using the Kubernetes
-    Python API client. No local kubectl binary required — all calls go directly
-    to the cluster API server over HTTPS using the credentials in KUBECONFIG.
-
-    Supports:
-      kubectl get <resource> [-n ns | -A] [name] [-o yaml|json]
-      kubectl describe <resource> <name> -n <ns>
-      kubectl logs <pod> -n <ns> [--tail=N] [-c container]
-      kubectl top nodes | top pods [-n ns | -A]
-      kubectl rollout history|status deployment/<name> -n <ns>
-      kubectl auth can-i <verb> <resource> [-n ns]
-      kubectl api-resources
-      kubectl version
-      Write operations (apply/delete/patch/scale) blocked unless
-        KUBECTL_ALLOW_WRITES=true (not yet implemented — raise clearly)
-
-    Parameters
-    ----------
-    command : str
-        Full kubectl command string, e.g. ``kubectl get pods -n vault-system``.
-
-    Returns
-    -------
-    str
-        Formatted output, or ``[ERROR] ...`` on failure.
-    """
     command = command.strip()
     _log.info(f"[kubectl_exec] {command!r}")
 
@@ -2091,24 +1884,19 @@ def kubectl_exec(command: str) -> str:
         out = out[:_KUBECTL_MAX_OUT] + f"\n...[output truncated at {_KUBECTL_MAX_OUT} chars]"
     return out
 
-# in a single tool call — avoids calling describe_pod on every pod individually.
-
 def _parse_cpu_to_millicores(cpu_str: str) -> int:
-    """Convert a K8s CPU string to millicores (int). Returns 0 if unparseable."""
     if not cpu_str or cpu_str in ("none", "<none>", "0"):
         return 0
     cpu_str = cpu_str.strip()
     try:
         if cpu_str.endswith("m"):
             return int(cpu_str[:-1])
-        # Whole cores (e.g. "1", "2.5")
+
         return int(float(cpu_str) * 1000)
     except (ValueError, TypeError):
         return 0
 
-
 def _parse_mem_to_mib(mem_str: str) -> float:
-    """Convert a K8s memory string to MiB (float). Returns 0 if unparseable."""
     if not mem_str or mem_str in ("none", "<none>", "0"):
         return 0.0
     mem_str = mem_str.strip()
@@ -2125,18 +1913,11 @@ def _parse_mem_to_mib(mem_str: str) -> float:
         for suffix, factor in _UNITS.items():
             if mem_str.endswith(suffix):
                 return float(mem_str[: -len(suffix)]) * factor
-        return float(mem_str) / (1024 * 1024)  # raw bytes → MiB
+        return float(mem_str) / (1024 * 1024)
     except (ValueError, TypeError):
         return 0.0
 
-
-
 def get_namespace_resource_summary(namespace: str) -> str:
-    """
-    Aggregate CPU and memory requests/limits for ALL pods in a namespace.
-    Includes both regular containers and init containers.
-    Returns total CPU/memory requested and limited, plus per-pod breakdown.
-    """
     try:
         pods = _core.list_namespaced_pod(namespace=namespace, limit=1000)
     except ApiException as e:
@@ -2204,7 +1985,6 @@ def get_namespace_resource_summary(namespace: str) -> str:
 
     return "\n".join(lines_out)
 
-
     def _fmt_cpu(m: int) -> str:
         if m == 0:
             return "0m (none set)"
@@ -2228,9 +2008,6 @@ def get_namespace_resource_summary(namespace: str) -> str:
 
     return "\n".join(lines)
 
-
-# INSERT / UPDATE / DELETE / DROP / TRUNCATE / ALTER / CREATE are blocked.
-
 _ALLOW_DB_EXEC = os.getenv("ALLOW_DB_EXEC", "true").lower() in ("1", "true", "yes")
 
 _SQL_WRITE_RE = re.compile(
@@ -2239,7 +2016,6 @@ _SQL_WRITE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Keys that commonly hold DB credentials in secrets / configmaps
 _DB_USER_KEYS  = ("username", "user", "db-user", "db_user", "postgresql-user",
                   "mysql-user", "mariadb-user", "database-user")
 _DB_PASS_KEYS  = ("password", "pass", "db-password", "db_password",
@@ -2250,7 +2026,6 @@ _DB_NAME_KEYS  = ("database", "db", "db-name", "db_name", "dbname",
 _DB_HOST_KEYS  = ("host", "db-host", "db_host", "postgresql-host", "mysql-host")
 _DB_PORT_KEYS  = ("port", "db-port", "db_port", "postgresql-port", "mysql-port")
 
-
 def _b64decode_safe(val: str) -> str:
     import base64 as _b64
     try:
@@ -2258,18 +2033,11 @@ def _b64decode_safe(val: str) -> str:
     except Exception:
         return val.strip()
 
-
 def _find_db_credentials(namespace: str, pod_name: str) -> dict:
-    """
-    Inspect the named pod's env vars, secretRef, configMapRef, and volumeMounts
-    to discover DB credentials (user, password, database, host, port).
-    Returns a dict with keys: user, password, database, host, port (any may be None).
-    """
     import base64 as _b64
 
     creds: dict = {k: None for k in ("user", "password", "database", "host", "port")}
 
-    # Helper: check a key name against known patterns
     def _match(key: str, patterns: tuple) -> str | None:
         kl = key.lower().replace("-", "_")
         for p in patterns:
@@ -2278,7 +2046,6 @@ def _find_db_credentials(namespace: str, pod_name: str) -> dict:
         return None
 
     def _harvest(key: str, val: str):
-        """Slot a plain-text k/v into creds if it matches a known pattern."""
         if _match(key, _DB_USER_KEYS)  and not creds["user"]:
             creds["user"] = val
         elif _match(key, _DB_PASS_KEYS) and not creds["password"]:
@@ -2297,11 +2064,11 @@ def _find_db_credentials(namespace: str, pod_name: str) -> dict:
 
     for container in (pod.spec.containers or []):
         for env in (container.env or []):
-            # Plain value
+
             if env.value:
                 _harvest(env.name, env.value)
                 continue
-            # Value from secret
+
             if env.value_from:
                 vf = env.value_from
                 if vf.secret_key_ref:
@@ -2323,7 +2090,6 @@ def _find_db_credentials(namespace: str, pod_name: str) -> dict:
                     except ApiException:
                         pass
 
-        # envFrom — entire secret or configmap mounted as env
         for ef in (container.env_from or []):
             if ef.secret_ref:
                 try:
@@ -2344,15 +2110,8 @@ def _find_db_credentials(namespace: str, pod_name: str) -> dict:
 
     return creds
 
-
 def _detect_db_type(pod_name: str, namespace: str,
                     container_hint: str = "") -> str | None:
-    """
-    Detect whether a pod runs MySQL/MariaDB or PostgreSQL.
-    Checks in order: image name → container name → env var names → 'db'-named container fallback.
-    Returns 'mysql', 'postgres', or None.
-    If container_hint is given, check that container first.
-    """
     try:
         pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
     except ApiException:
@@ -2360,12 +2119,10 @@ def _detect_db_type(pod_name: str, namespace: str,
 
     containers = pod.spec.containers or []
 
-    # If a specific container is hinted, check it first
     if container_hint:
         containers = sorted(containers,
                             key=lambda c: 0 if c.name == container_hint else 1)
 
-    # Pass 1: image-based detection (most reliable)
     for c in containers:
         image = (c.image or "").lower()
         if any(x in image for x in ("mysql", "mariadb", "percona")):
@@ -2373,7 +2130,6 @@ def _detect_db_type(pod_name: str, namespace: str,
         if any(x in image for x in ("postgres", "postgresql", "pg:", "/pg-", "-pg-", "pgbouncer")):
             return "postgres"
 
-    # Pass 2: container name hints
     for c in containers:
         cname = (c.name or "").lower()
         if any(x in cname for x in ("mysql", "mariadb")):
@@ -2381,7 +2137,6 @@ def _detect_db_type(pod_name: str, namespace: str,
         if any(x in cname for x in ("postgres", "postgresql")):
             return "postgres"
 
-    # Pass 3: env var name hints (POSTGRES_* / MYSQL_* / PG* are definitive)
     for c in containers:
         for env in (c.env or []):
             name_lc = env.name.lower()
@@ -2390,8 +2145,6 @@ def _detect_db_type(pod_name: str, namespace: str,
             if name_lc.startswith(("mysql", "mariadb")):
                 return "mysql"
 
-    # Pass 4: container literally named "db" — default to postgres
-    # (most common in Cloudera ECS and similar deployments)
     for c in containers:
         cname = (c.name or "").lower()
         if cname in ("db", "database"):
@@ -2399,13 +2152,7 @@ def _detect_db_type(pod_name: str, namespace: str,
 
     return None
 
-
 def _find_db_container(pod_name: str, namespace: str, db_type: str) -> str:
-    """
-    Return the name of the container inside the pod that runs the DB CLI.
-    For multi-container pods, picks the container whose image or name best
-    matches the db_type. Falls back to the first container.
-    """
     try:
         pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
     except ApiException:
@@ -2416,12 +2163,10 @@ def _find_db_container(pod_name: str, namespace: str, db_type: str) -> str:
 
     hints = _MYSQL_HINTS if db_type == "mysql" else _POSTGRES_HINTS
 
-    # 1st pass: container whose image matches
     for c in (pod.spec.containers or []):
         if any(h in (c.image or "").lower() for h in hints):
             return c.name
 
-    # 2nd pass: container whose name matches (e.g. "db", "postgres", "mysql")
     for c in (pod.spec.containers or []):
         cname = (c.name or "").lower()
         if db_type == "mysql" and any(h in cname for h in ("mysql", "mariadb", "db")):
@@ -2429,17 +2174,10 @@ def _find_db_container(pod_name: str, namespace: str, db_type: str) -> str:
         if db_type == "postgres" and any(h in cname for h in ("postgres", "pg", "db")):
             return c.name
 
-    # Fallback: first container
     containers = pod.spec.containers or []
     return containers[0].name if containers else ""
 
-
 def _find_db_pod(namespace: str, hint: str = "") -> tuple[str | None, str | None]:
-    """
-    Find the first running DB pod in a namespace.
-    Returns (pod_name, db_type) or (None, None).
-    Optionally filters by `hint` substring in pod name.
-    """
     try:
         pods = _core.list_namespaced_pod(namespace=namespace)
     except ApiException:
@@ -2462,11 +2200,8 @@ def _find_db_pod(namespace: str, hint: str = "") -> tuple[str | None, str | None
 
     return None, None
 
-
-
 def _exec_simple_query(pod_name: str, namespace: str, container_name: str,
                        cmd: str) -> str:
-    """Run a one-shot shell command inside a pod and return stdout, or empty string on error."""
     from kubernetes.stream import stream as _k8s_stream
     try:
         kwargs = dict(stderr=False, stdin=False, stdout=True,
@@ -2483,17 +2218,11 @@ def _exec_simple_query(pod_name: str, namespace: str, container_name: str,
     except Exception:
         return ""
 
-
 _PG_SYSTEM_DBS = {"postgres", "template0", "template1"}
-
 
 def _discover_pg_database(pod_name: str, namespace: str,
                            container_name: str, user: str,
                            password: str) -> str:
-    """
-    Connect to the 'postgres' maintenance DB and return the first non-system
-    database found in pg_database. Falls back to 'postgres' if nothing found.
-    """
     pg_env = ("PGPASSWORD='" + password + "' ") if password else ""
     user_flag = ("-U " + user) if user else ""
     inner_sql = "SELECT datname FROM pg_database WHERE datistemplate=false ORDER BY datname"
@@ -2509,17 +2238,11 @@ def _discover_pg_database(pod_name: str, namespace: str,
             return db
     return "postgres"
 
-
 _MYSQL_SYSTEM_DBS = {"information_schema", "performance_schema", "mysql", "sys"}
-
 
 def _discover_mysql_database(pod_name: str, namespace: str,
                               container_name: str, user: str,
                               password: str, host: str, port: str) -> str:
-    """
-    Run SHOW DATABASES inside the pod and return the first non-system database.
-    Falls back to empty string if nothing found.
-    """
     pass_arg = ("-p'" + password + "'") if password else ""
     cmd = (
         "mysql -u" + user + " " + pass_arg + " -h" + host + " -P" + port + " "
@@ -2532,39 +2255,9 @@ def _discover_mysql_database(pod_name: str, namespace: str,
             return db
     return ""
 
-
 def exec_db_query(namespace: str, sql: str,
                   pod_name: str = "", database: str = "",
                   container: str = "") -> str:
-    """
-    Execute a read-only SQL query inside a database pod in the given namespace.
-
-    Workflow:
-      1. Locate a running DB pod (MySQL/MariaDB or PostgreSQL) — auto-detected
-         from container image. Use pod_name to target a specific pod.
-      2. Identify the correct container inside the pod (e.g. "db" in multi-container pods).
-         Use container= to override auto-detection.
-      3. Retrieve DB credentials (user, password, database name) from the pod's
-         environment variables, secretRefs, and configMapRefs.
-      4. Run the SQL via kubectl exec using the K8s stream API.
-
-    Only SELECT and other read-only statements are permitted.
-    INSERT / UPDATE / DELETE / DROP / ALTER / TRUNCATE are blocked.
-
-    Parameters
-    ----------
-    namespace : str
-        Kubernetes namespace to search for the DB pod.
-    sql : str
-        SQL query to run (SELECT only — write operations are blocked).
-    pod_name : str, optional
-        Specific pod name to target. If empty, the first running DB pod is used.
-    database : str, optional
-        Database/schema name to connect to. Overrides auto-detected value.
-    container : str, optional
-        Container name inside the pod. If empty, auto-detected from image/name.
-        Use this when the pod has multiple containers and auto-detection picks wrong one.
-    """
     if not _ALLOW_DB_EXEC:
         return "[ERROR] DB query execution is disabled. Set ALLOW_DB_EXEC=true to enable."
 
@@ -2579,12 +2272,12 @@ def exec_db_query(namespace: str, sql: str,
         )
 
     if pod_name:
-        # Strip namespace/ prefix if LLM passes it
+
         if "/" in pod_name:
             pod_name = pod_name.split("/", 1)[1]
         db_type = _detect_db_type(pod_name, namespace, container_hint=container)
         if not db_type:
-            # List available containers to help diagnose
+
             try:
                 pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
                 cnames = [c.name for c in (pod.spec.containers or [])]
@@ -2602,13 +2295,13 @@ def exec_db_query(namespace: str, sql: str,
     _log.info(f"[exec_db_query] pod={namespace}/{pod_name}  db_type={db_type}")
 
     if container:
-        container_name = container  # explicit override
+        container_name = container
     else:
         container_name = _find_db_container(pod_name, namespace, db_type)
     _log.info(f"[exec_db_query] container={container_name!r}")
 
     creds = _find_db_credentials(namespace, pod_name)
-    # Explicit caller override wins; then env-var discovery; then live DB query fallback
+
     db_name = database or creds.get("database") or ""
 
     _log.debug(f"[exec_db_query] creds found: user={creds['user']}  "
@@ -2624,7 +2317,6 @@ def exec_db_query(namespace: str, sql: str,
         host     = creds["host"] or "127.0.0.1"
         port     = creds["port"] or "3306"
 
-        # Auto-discover the application database if not found from env vars
         if not db_name:
             db_name = _discover_mysql_database(
                 pod_name, namespace, container_name, user, password, host, port)
@@ -2643,28 +2335,25 @@ def exec_db_query(namespace: str, sql: str,
         user     = creds["user"] or "postgres"
         password = creds["password"] or ""
 
-        # Auto-discover the application database if not found from env vars.
-        # NEVER default to the username — that almost always points to the wrong db.
         if not db_name:
             db_name = _discover_pg_database(
                 pod_name, namespace, container_name, user, password)
             _log.info(f"[exec_db_query] postgres db auto-discovered: {db_name!r}")
 
-        # MySQL: table_schema=DATABASE()  →  PostgreSQL: any non-system schema
         pg_sql = re.sub(
             r"table_schema\s*=\s*DATABASE\s*\(\s*\)",
             "table_schema NOT IN ('information_schema','pg_catalog','pg_toast')",
             safe_sql,
             flags=re.IGNORECASE,
         )
-        # Neutral COUNT: strip MySQL-only system schemas that don't exist in PG
+
         pg_sql = re.sub(
             r"'performance_schema'\s*,\s*'sys'\s*",
             "",
             pg_sql,
             flags=re.IGNORECASE,
         )
-        # MySQL: SHOW TABLES  →  list tables in connected db (all non-system schemas)
+
         if re.match(r"^\s*SHOW\s+TABLES\s*$", pg_sql, re.IGNORECASE):
             pg_sql = (
                 "SELECT schemaname, tablename "
@@ -2672,10 +2361,10 @@ def exec_db_query(namespace: str, sql: str,
                 "WHERE schemaname NOT IN ('information_schema','pg_catalog','pg_toast') "
                 "ORDER BY schemaname, tablename"
             )
-        # MySQL: SHOW DATABASES  →  PostgreSQL equivalent
+
         if re.match(r"^\s*SHOW\s+DATABASES\s*$", pg_sql, re.IGNORECASE):
             pg_sql = "SELECT datname FROM pg_database ORDER BY datname"
-        # MySQL: DESCRIBE <table>  →  PostgreSQL equivalent
+
         _desc = re.match(r"^\s*DESCRIBE\s+(\S+)\s*$", pg_sql, re.IGNORECASE)
         if _desc:
             tbl = _desc.group(1).strip("`\"'")
@@ -2685,10 +2374,8 @@ def exec_db_query(namespace: str, sql: str,
                 f"WHERE table_name = '{tbl}' ORDER BY ordinal_position"
             )
 
-        safe_sql = pg_sql.replace("'", "'\\''")  # escape after all PG translations
+        safe_sql = pg_sql.replace("'", "'\\''")
 
-        # Try local Unix socket first (peer/trust auth — most common inside containers).
-        # If host is explicitly set in env vars, use TCP instead.
         host = creds.get("host") or ""
         port = creds.get("port") or "5432"
 
@@ -2697,19 +2384,19 @@ def exec_db_query(namespace: str, sql: str,
         user_flag = f"-U {user}" if user else ""
 
         if host and host not in ("localhost", "127.0.0.1", "::1"):
-            # Remote TCP connection
+
             cmd = (
                 f"{pg_env}psql {user_flag} -h {host} -p {port} "
                 f"{db_flag} --no-password -t -A -c '{safe_sql}'"
             )
         else:
-            # Local socket — try peer/trust auth first, then fall back to postgres superuser
+
             cmd = (
                 f"{pg_env}psql {user_flag} {db_flag} "
                 f"--no-password -t -A -c '{safe_sql}' 2>&1 || "
-                # fallback 1: drop -U (use OS user inside the container)
+
                 f"psql {db_flag} -t -A -c '{safe_sql}' 2>&1 || "
-                # fallback 2: use postgres superuser (handles UID 999 / no OS user)
+
                 f"psql -U postgres {db_flag} -t -A -c '{safe_sql}'"
             )
         exec_cmd = ["/bin/sh", "-c", cmd]
@@ -2724,7 +2411,7 @@ def exec_db_query(namespace: str, sql: str,
         tty=False,
         _preload_content=True,
     )
-    # Pass container name for multi-container pods — required by the K8s API
+
     if container_name:
         stream_kwargs["container"] = container_name
 
@@ -2745,16 +2432,13 @@ def exec_db_query(namespace: str, sql: str,
     if not output:
         return "(Query returned no rows.)"
 
-    # Truncate to protect LLM context window
     if len(output) > _KUBECTL_MAX_OUT:
         output = output[:_KUBECTL_MAX_OUT] + f"\n...[output truncated at {_KUBECTL_MAX_OUT} chars]"
 
-    # Prepend a summary header for the LLM
     header = (f"DB query result  [{db_type.upper()} · pod={pod_name} · ns={namespace}"
               + (f" · db={db_name}" if db_name else "") + "]\n"
               + "-" * 60 + "\n")
     return header + output
-
 
 K8S_TOOLS: dict = {
 
