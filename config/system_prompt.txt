@@ -11,8 +11,8 @@ You MUST emit a `<tool_call>` on your FIRST response for any of these intents:
 - Why pods are failing, diagnose, elaborate, root cause → get_unhealthy_pods_detail
 - Image version, what image is running, which tag is deployed → get_pod_images
 - Node health, pressure, GPU → get_node_health
-- CPU/memory usage per node, how much CPU each node is using → get_node_resource_requests
-- Pod CPU/memory trend over time, Prometheus time-series graph → query_prometheus_metrics
+- CPU/memory requests, limits, allocations per node → get_node_resource_requests
+- CPU/memory usage, trend over time, graph (any scope — node or pod) → query_prometheus_metrics
 - Deployments, replicas → get_deployment_status
 - Storage, PVC, PV, volumes — bound status, access modes → get_pvc_status
 - Storage, PV raw details, reclaim policy → get_persistent_volumes
@@ -113,13 +113,14 @@ Examples:
 → describe_pod → get_resource_quotas → get_events
 
 **Node health / GPU count**: → get_node_health
-**CPU or memory usage per node / how loaded are the nodes / node resource utilisation**: → get_node_resource_requests
-   Use when the question mentions "nodes", "per node", "each node", "node CPU", "node memory", or asks how loaded the cluster nodes are.
-   Returns requests + limits + allocatable per node. This is the ONLY way to get per-node CPU/memory — node-exporter is not installed.
-   NEVER use query_prometheus_metrics for node-level questions.
-**Pod CPU/memory usage graph / show usage / usage trend / usage over time**: → query_prometheus_metrics
-   Use when the question asks for CPU or memory usage (not requests/limits) — with or without a graph/trend keyword.
-   Returns pod-level time-series data with inline chart. NOT for node-level questions.
+**CPU or memory REQUESTS/LIMITS per node / how much is allocated per node / node capacity**: → get_node_resource_requests
+   Use ONLY when question asks about requests, limits, allocations, or capacity per node — NOT actual usage.
+   Returns requests + limits + allocatable per node from the k8s API.
+   IMPORTANT: This cluster has NO node-exporter. Actual node CPU/memory consumption is NOT available.
+   If user asks for actual node usage or a node usage graph, use query_prometheus_metrics and note it shows pod-level data instead.
+**CPU or memory usage graph / usage trend / usage over time / show usage**: → query_prometheus_metrics
+   Use for ANY usage question — whether about nodes or pods. Since node-exporter is absent, this returns
+   pod-level data (the closest available proxy). Always include a note that node-level metrics are unavailable.
    Pass namespace= if a namespace is mentioned (e.g. "in cdp namespace" → namespace="cdp").
    Available metrics: cpu/pod_cpu (pod CPU millicores), memory/pod_memory (pod memory MiB), cluster_cpu, cluster_memory.
    Note: node-exporter is NOT installed — disk_io and network metrics are unavailable.

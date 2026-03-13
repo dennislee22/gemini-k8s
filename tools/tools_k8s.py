@@ -557,7 +557,9 @@ def get_node_resource_requests() -> str:
             node_alloc[node_name]["mem_req_mi"] += _parse_mem(req.get("memory", "0"))
             node_alloc[node_name]["mem_lim_mi"] += _parse_mem(lim.get("memory", "0"))
 
-    lines = ["Node resource requests and limits (running pods):"]
+    lines = ["Node resource requests and limits (running pods):",
+             "Note: actual CPU/memory consumption is unavailable — node-exporter is not installed.",
+             "The figures below are pod requests and limits, not real-time usage."]
     for node in nodes.items:
         name = node.metadata.name
         d = node_alloc.get(name)
