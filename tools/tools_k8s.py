@@ -3760,10 +3760,11 @@ K8S_TOOLS["get_pv_usage"] = {
 K8S_TOOLS["get_node_resource_requests"] = {
     "fn":          get_node_resource_requests,
     "description": (
-        "Aggregate CPU and memory requests and limits per node by summing across all running pods. "
-        "Returns requests and limits in millicores/MiB with percentage of allocatable capacity per node. "
-        "Use for: 'what resources are requested per node', 'how much CPU/memory is requested on each node', "
-        "'node resource utilization', 'which node has the most requests', 'resource pressure per node'."
+        "Returns pod resource REQUESTS and LIMITS aggregated per node — this is scheduling/allocation "
+        "data, not real-time consumption. Use for: 'what is requested per node', 'how much CPU/memory "
+        "is allocated on each node', 'which node is most heavily scheduled', 'node capacity vs requests'. "
+        "Do NOT use for questions about actual usage, CPU load, memory consumption, or time-series trends — "
+        "those require query_prometheus_metrics."
     ),
     "parameters": {},
 }
@@ -3772,15 +3773,17 @@ K8S_TOOLS["get_node_resource_requests"] = {
 K8S_TOOLS["query_prometheus_metrics"] = {
     "fn":          query_prometheus_metrics,
     "description": (
-        "Query Prometheus for real-time performance metrics and render an inline time-series chart. "
-        "Use for: CPU usage per node, memory usage per node, pod CPU/memory usage, PVC disk I/O, "
-        "network throughput, or any PromQL metric. "
-        "Supported metric shortcuts: 'cpu' (node CPU %), 'memory' (node memory %), "
-        "'pod_cpu' (pod CPU cores), 'pod_memory' (pod memory MiB), "
-        "'disk_io' (PVC I/O bytes/s), 'network_in', 'network_out'. "
-        "You may also pass a raw PromQL expression as the metric parameter. "
+        "Query Prometheus for real-time usage metrics and render an inline time-series chart. "
+        "Use for any question about actual usage, load, consumption, or trends — regardless of "
+        "whether the user says 'nodes' or 'pods'. "
+        "IMPORTANT: this cluster has no node-exporter installed, so per-node CPU/memory consumption "
+        "is not available. All metrics are pod-level. When a user asks for node usage, use this tool "
+        "and note that pod-level data is the closest available proxy. "
+        "Available metrics: 'cpu'/'pod_cpu' (pod CPU in millicores), 'memory'/'pod_memory' "
+        "(pod memory in MiB), 'cluster_cpu', 'cluster_memory'. "
+        "Disk I/O and network metrics are unavailable (no node-exporter). "
         "duration sets the time window (e.g. '1h', '6h', '24h', '7d'). "
-        "step controls resolution (e.g. '60s', '5m')."
+        "namespace filters to a specific namespace (leave empty for all)."
     ),
     "parameters": {
         "metric": {
