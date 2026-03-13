@@ -1243,6 +1243,39 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
                          "sum by (instance) (rate(node_network_transmit_bytes_total{device!='lo'}[5m]))",
                          "bytes/s"),
     }
+    # Fallback PromQLs tried if primary returns empty (Rancher/RKE uses different labels)
+    FALLBACK_PROMQL = {
+        "cpu": [
+            "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
+            "100 - (avg by (node)     (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
+            "(1 - avg by (instance)   (rate(node_cpu_seconds_total{mode='idle'}[5m]))) * 100",
+            "sum by (instance) (rate(node_cpu_seconds_total{mode!='idle',mode!='iowait'}[5m])) * 100"
+            " / sum by (instance) (rate(node_cpu_seconds_total[5m]))",
+        ],
+        "node_cpu": [
+            "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
+            "100 - (avg by (node)     (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
+        ],
+        "memory": [
+            "100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)",
+            "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+            "100 * (1 - ((node_memory_MemFree_bytes + node_memory_Buffers_bytes"
+            " + node_memory_Cached_bytes) / node_memory_MemTotal_bytes))",
+        ],
+        "node_memory": [
+            "100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)",
+            "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+        ],
+        "pod_cpu": [
+            "sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{container!='',pod!=''}[5m]))",
+            "sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{container!='POD',pod!=''}[5m]))",
+        ],
+        "pod_memory": [
+            "sum by (pod, namespace) (container_memory_working_set_bytes{container!='',pod!=''}) / 1048576",
+            "sum by (pod, namespace) (container_memory_usage_bytes{container!='',pod!=''}) / 1048576",
+        ],
+    }
+
     key = metric.lower().replace(" ", "_").replace("-", "_")
     title, promql, unit = METRIC_MAP.get(key, (
         f"Metric: {metric}",
@@ -1295,10 +1328,20 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
                 prom_pod, prom_ns,
                 command=["/bin/sh", "-c", cmd],
                 container=prom_container,
-                stderr=True, stdin=False, stdout=True, tty=False,
+                stderr=False, stdin=False, stdout=True, tty=False,
                 _preload_content=True,
             )
-            return resp.strip() if isinstance(resp, str) else ""
+            # k8s client may return str, bytes, or a dict (deserialised by some versions)
+            if isinstance(resp, bytes):
+                resp = resp.decode("utf-8", errors="replace")
+            elif not isinstance(resp, str):
+                # Some k8s client versions return a dict-like object — re-serialise to JSON
+                import json as _js
+                try:
+                    resp = _js.dumps(resp) if hasattr(resp, "__iter__") else str(resp)
+                except Exception:
+                    resp = str(resp)
+            return resp.strip()
         except Exception as exc:
             return f"[exec error: {exc}]"
 
@@ -1329,16 +1372,64 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
     try:
         data = _json_local.loads(raw)
     except Exception:
-        return f"Prometheus returned non-JSON response:\n{raw[:500]}"
+        # Fallback: some k8s client versions return Python dict repr (single quotes)
+        # Try ast.literal_eval to recover
+        import ast as _ast
+        try:
+            data = _ast.literal_eval(raw)
+        except Exception:
+            return f"Prometheus returned non-JSON response:\n{raw[:500]}"
 
     if data.get("status") != "success":
         return f"Prometheus query failed: {data.get('error', data)}"
 
     results = data.get("data", {}).get("result", [])
     if not results:
+        # Try fallback PromQLs for this metric key before giving up
+        tried = [promql]
+        for fallback_pql in FALLBACK_PROMQL.get(key, []):
+            if fallback_pql in tried:
+                continue
+            tried.append(fallback_pql)
+            fb_encoded = _up.quote(fallback_pql, safe="")
+            fb_url = (f"{api_base}/query_range"
+                      f"?query={fb_encoded}"
+                      f"&start={start_ts}&end={end_ts}&step={step}")
+            fb_raw = _exec(f"curl -s --max-time 15 '{fb_url}'")
+            try:
+                fb_data = _json_local.loads(fb_raw)
+            except Exception:
+                import ast as _ast2
+                try:
+                    fb_data = _ast2.literal_eval(fb_raw)
+                except Exception:
+                    continue
+            fb_results = fb_data.get("data", {}).get("result", [])
+            if fb_results:
+                results = fb_results
+                promql  = fallback_pql  # for summary line
+                break
+
+    if not results:
+        # Try to discover what CPU/memory metrics are actually available
+        disc_url = f"{api_base}/label/__name__/values"
+        disc_raw = _exec(f"curl -s --max-time 10 '{disc_url}'")
+        available_hint = ""
+        try:
+            disc_data = _json_local.loads(disc_raw)
+            all_metrics = disc_data.get("data", [])
+            # Filter to relevant ones
+            relevant = [m for m in all_metrics if any(
+                kw in m for kw in ["cpu", "memory", "mem", "node_", "container_"]
+            )][:20]
+            if relevant:
+                available_hint = f"\nAvailable metrics on this cluster include: {', '.join(relevant[:15])}"
+        except Exception:
+            pass
         return (f"No data returned for metric '{metric}' over the last {duration}. "
                 f"The PromQL may not match any active series on this cluster.\n"
-                f"PromQL used: {promql}")
+                f"PromQL tried: {promql}"
+                + available_hint)
 
     # ── Build chart payload ─────────────────────────────────────────────────
     # Cap series at 8 to keep the chart readable
