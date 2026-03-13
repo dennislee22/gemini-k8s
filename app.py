@@ -1063,7 +1063,7 @@ def build_agent():
         _log_ag.debug(f"[llm_node itr={itr}] chat_msgs count={len(chat_msgs)} has_tool_results={has_tool_results}")
 
         if not has_tool_results:
-            _max_new = 512
+            _max_new = max(1024, _MAX_NEW_TOKENS // 2)
         else:
             _max_new = max(512, _MAX_NEW_TOKENS)
         _log_ag.debug(f"[llm_node itr={itr}] max_new_tokens={_max_new}")

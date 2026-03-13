@@ -73,8 +73,6 @@ def _is_high_restart(pod, restart_count: int) -> bool:
 
     if restart_count == 0:
         return False
-    if restart_count > 100:
-        return True
 
     now = _dt.datetime.now(_dt.timezone.utc)
 
@@ -90,6 +88,9 @@ def _is_high_restart(pod, restart_count: int) -> bool:
         hours_since_last = (now - last_restart_time).total_seconds() / 3600
         if hours_since_last > 24:
             return False
+
+    if restart_count > 100:
+        return True
 
     run_start = None
     for cs in (pod.status.container_statuses or []):
