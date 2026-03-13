@@ -114,8 +114,9 @@ Examples:
 
 **Node health / GPU count**: → get_node_health
 **Node resource requests / limits / how much CPU or memory is requested per node**: → get_node_resource_requests
-**Performance graphs / time-series metrics / CPU trend / memory trend / disk I/O / network throughput / Prometheus query**: → query_prometheus_metrics
-   Pass metric= derived from question (cpu, memory, pod_cpu, pod_memory, disk_io, network_in, network_out).
+**Performance graphs / time-series metrics / CPU trend / memory trend / Prometheus query**: → query_prometheus_metrics
+   Available metrics on this cluster: cpu/pod_cpu (pod CPU millicores), memory/pod_memory (pod memory MiB), cluster_cpu, cluster_memory.
+   Note: node-exporter is NOT installed — disk_io and network metrics are unavailable.
    Pass duration= from question (1h, 6h, 24h, 7d). Default duration: 1h. Default metric: cpu.
 **GPU model / GPU spec / GPU type / GPU product name / GPU memory / CUDA driver**: → get_gpu_info
 **Deployments / replicas**: → get_deployment_status

@@ -1205,76 +1205,70 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
     from kubernetes.stream import stream as _k8s_stream
 
     # ── PromQL templates ────────────────────────────────────────────────────
+    # ── Metric map tuned for this cluster's Prometheus (no node-exporter).
+    # CPU/memory metrics come from the metrics-server-exporter sidecar,
+    # exposed as container_cpu_usage (millicores gauge) and
+    # container_memory_usage_bytes (bytes gauge), labelled by pod+namespace.
     METRIC_MAP = {
-        # CPU
-        "cpu":          ("CPU Usage per Node (%)",
-                         "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
-                         "%"),
-        "node_cpu":     ("CPU Usage per Node (%)",
-                         "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
-                         "%"),
-        # Memory
-        "memory":       ("Memory Usage per Node (%)",
-                         "100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)",
-                         "%"),
-        "node_memory":  ("Memory Usage per Node (%)",
-                         "100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)",
-                         "%"),
-        # Pod CPU
-        "pod_cpu":      ("Pod CPU Usage (cores)",
-                         "sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{container!='',pod!=''}[5m]))",
-                         "cores"),
-        # Pod Memory
-        "pod_memory":   ("Pod Memory Usage (MiB)",
-                         "sum by (pod, namespace) (container_memory_working_set_bytes{container!='',pod!=''}) / 1048576",
+        # CPU — millicores per pod (this cluster has no node-exporter)
+        "cpu":          ("Pod CPU Usage (millicores)",
+                         "sort_desc(sum by (pod, namespace) (container_cpu_usage))",
+                         "m"),
+        "node_cpu":     ("Pod CPU Usage (millicores)",
+                         "sort_desc(sum by (pod, namespace) (container_cpu_usage))",
+                         "m"),
+        "pod_cpu":      ("Pod CPU Usage (millicores)",
+                         "sort_desc(sum by (pod, namespace) (container_cpu_usage))",
+                         "m"),
+        # Memory — MiB per pod
+        "memory":       ("Pod Memory Usage (MiB)",
+                         "sort_desc(sum by (pod, namespace) (container_memory_usage_bytes)) / 1048576",
                          "MiB"),
-        # PVC disk I/O
-        "disk_io":      ("PVC Disk I/O (bytes/s)",
-                         "sum by (persistentvolumeclaim, namespace) (rate(kubelet_volume_stats_used_bytes[5m]))",
-                         "bytes/s"),
-        "pvc_io":       ("PVC Disk I/O (bytes/s)",
-                         "sum by (persistentvolumeclaim, namespace) (rate(kubelet_volume_stats_used_bytes[5m]))",
-                         "bytes/s"),
-        # Generic fallback
-        "network_in":   ("Network Receive (bytes/s)",
-                         "sum by (instance) (rate(node_network_receive_bytes_total{device!='lo'}[5m]))",
-                         "bytes/s"),
-        "network_out":  ("Network Transmit (bytes/s)",
-                         "sum by (instance) (rate(node_network_transmit_bytes_total{device!='lo'}[5m]))",
-                         "bytes/s"),
+        "node_memory":  ("Pod Memory Usage (MiB)",
+                         "sort_desc(sum by (pod, namespace) (container_memory_usage_bytes)) / 1048576",
+                         "MiB"),
+        "pod_memory":   ("Pod Memory Usage (MiB)",
+                         "sort_desc(sum by (pod, namespace) (container_memory_usage_bytes)) / 1048576",
+                         "MiB"),
+        # Cluster-wide CPU limit total (single scalar — no node breakdown available)
+        "cluster_cpu":  ("Cluster CPU Limits (cores)",
+                         "cluster:kube_pod_container_resource_limits_cpu_cores:sum",
+                         "cores"),
+        "cluster_memory": ("Cluster Memory Limits (bytes)",
+                           "cluster:kube_pod_container_resource_limits_memory_bytes:sum",
+                           "bytes"),
+        # Disk I/O — not available without node-exporter; return helpful message
+        "disk_io":      ("PVC Disk I/O",
+                         "container_cpu_usage",   # placeholder — overridden below
+                         "n/a"),
+        "pvc_io":       ("PVC Disk I/O",
+                         "container_cpu_usage",
+                         "n/a"),
+        # Network — not available without node-exporter
+        "network_in":   ("Network Receive",
+                         "container_cpu_usage",
+                         "n/a"),
+        "network_out":  ("Network Transmit",
+                         "container_cpu_usage",
+                         "n/a"),
     }
-    # Fallback PromQLs tried if primary returns empty (Rancher/RKE uses different labels)
+    # Fallback PromQLs: tried in order if primary returns empty
     FALLBACK_PROMQL = {
-        "cpu": [
-            "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
-            "100 - (avg by (node)     (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
-            "(1 - avg by (instance)   (rate(node_cpu_seconds_total{mode='idle'}[5m]))) * 100",
-            "sum by (instance) (rate(node_cpu_seconds_total{mode!='idle',mode!='iowait'}[5m])) * 100"
-            " / sum by (instance) (rate(node_cpu_seconds_total[5m]))",
-        ],
-        "node_cpu": [
-            "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
-            "100 - (avg by (node)     (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
-        ],
-        "memory": [
-            "100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)",
-            "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
-            "100 * (1 - ((node_memory_MemFree_bytes + node_memory_Buffers_bytes"
-            " + node_memory_Cached_bytes) / node_memory_MemTotal_bytes))",
-        ],
-        "node_memory": [
-            "100 - ((node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)",
-            "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
-        ],
-        "pod_cpu": [
-            "sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{container!='',pod!=''}[5m]))",
-            "sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{container!='POD',pod!=''}[5m]))",
-        ],
-        "pod_memory": [
-            "sum by (pod, namespace) (container_memory_working_set_bytes{container!='',pod!=''}) / 1048576",
-            "sum by (pod, namespace) (container_memory_usage_bytes{container!='',pod!=''}) / 1048576",
-        ],
+        "cpu":        ["sum by (pod, namespace) (kube_metrics_server_pods_cpu)"],
+        "node_cpu":   ["sum by (pod, namespace) (kube_metrics_server_pods_cpu)"],
+        "pod_cpu":    ["sum by (pod, namespace) (kube_metrics_server_pods_cpu)"],
+        "memory":     ["sort_desc(sum by (pod, namespace) (container_memory_usage_bytes)) / 1048576"],
+        "node_memory":["sort_desc(sum by (pod, namespace) (container_memory_usage_bytes)) / 1048576"],
+        "pod_memory": ["sort_desc(sum by (pod, namespace) (container_memory_usage_bytes)) / 1048576"],
     }
+
+    # Metrics not available on this cluster (no node-exporter)
+    _UNAVAILABLE = {"disk_io", "pvc_io", "network_in", "network_out"}
+    if key in _UNAVAILABLE:
+        return (f"The '{metric}' metric is not available on this cluster. "
+                f"Node-exporter is not installed, so disk I/O and network metrics are not scraped. "
+                f"Available metrics: cpu (pod CPU millicores), memory (pod memory MiB), "
+                f"pod_cpu, pod_memory, cluster_cpu, cluster_memory.")
 
     key = metric.lower().replace(" ", "_").replace("-", "_")
     title, promql, unit = METRIC_MAP.get(key, (
@@ -1437,15 +1431,22 @@ def query_prometheus_metrics(metric: str = "cpu", duration: str = "1h", step: st
     for r in results[:8]:
         metric_labels = r.get("metric", {})
         # Build a readable series label
-        label_parts = []
-        for lk in ("instance", "pod", "namespace", "persistentvolumeclaim", "device"):
-            if lk in metric_labels:
-                v = metric_labels[lk]
-                # Shorten hostnames like ecs-m-01.dlee155.cldr.example → ecs-m-01
-                if "." in v and lk == "instance":
-                    v = v.split(".")[0]
-                label_parts.append(v)
-        label = "/".join(label_parts) if label_parts else str(metric_labels)
+        # Build a readable label: prefer namespace/pod, fall back to other dims
+        ns_val  = metric_labels.get("namespace") or metric_labels.get("pod_namespace") or ""
+        pod_val = metric_labels.get("pod")       or metric_labels.get("pod_name")      or ""
+        if ns_val and pod_val:
+            label = f"{ns_val}/{pod_val}"
+        elif pod_val:
+            label = pod_val
+        elif ns_val:
+            label = ns_val
+        else:
+            # fallback: instance (shorten hostname), then any first label value
+            inst = metric_labels.get("instance", "")
+            if inst:
+                label = inst.split(".")[0]
+            else:
+                label = next(iter(metric_labels.values()), "unknown")
 
         values = r.get("values", [])
         series_out.append({

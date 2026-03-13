@@ -2110,13 +2110,20 @@ function renderGraphBlock(payload, container) {
 
   // ── Format values ────────────────────────────────────────────────────────
   function fmt(v) {
-    if (unit === '%') return v.toFixed(1) + '%';
+    if (unit === '%')     return v.toFixed(1) + '%';
     if (unit === 'cores') return v.toFixed(3);
-    if (unit === 'MiB') return v.toFixed(0) + 'Mi';
-    if (unit === 'bytes/s') {
+    if (unit === 'm')     return v.toFixed(1) + 'm';   // millicores
+    if (unit === 'MiB')   return v.toFixed(0) + 'Mi';
+    if (unit === 'bytes') {
+      if (v >= 1e9) return (v / 1e9).toFixed(2) + 'G';
       if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
       if (v >= 1e3) return (v / 1e3).toFixed(0) + 'k';
       return v.toFixed(0);
+    }
+    if (unit === 'bytes/s') {
+      if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M/s';
+      if (v >= 1e3) return (v / 1e3).toFixed(0) + 'k/s';
+      return v.toFixed(0) + '/s';
     }
     return v.toFixed(1);
   }
