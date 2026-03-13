@@ -345,6 +345,155 @@ def describe_pod(pod_name: str, namespace: str = "default") -> str:
         return (f"Pod '{pod_name}' not found."
                 if e.status == 404 else f"K8s error: {e.reason}")
 
+def get_unhealthy_pods_detail(namespace: str = "all") -> str:
+    import datetime as _dt
+    from datetime import timezone
+
+    def _collect_unhealthy():
+        found = []
+        for phase in ("Pending", "Failed", "Unknown"):
+            try:
+                result = (_core.list_pod_for_all_namespaces(field_selector=f"status.phase={phase}")
+                          if namespace == "all"
+                          else _core.list_namespaced_pod(namespace=namespace, field_selector=f"status.phase={phase}"))
+                found.extend(result.items)
+            except ApiException:
+                pass
+        _cont = None
+        while True:
+            try:
+                kw = {"field_selector": "status.phase=Running", "limit": 100}
+                if namespace != "all":
+                    kw["namespace"] = namespace
+                if _cont:
+                    kw["_continue"] = _cont
+                page = (_core.list_pod_for_all_namespaces(**kw)
+                        if namespace == "all"
+                        else _core.list_namespaced_pod(**kw))
+                for pod in page.items:
+                    restarts = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
+                    ready    = sum(1 for cs in (pod.status.container_statuses or []) if cs.ready)
+                    tot      = len(pod.spec.containers)
+                    if ready < tot or _is_high_restart(pod, restarts):
+                        found.append(pod)
+                _cont = page.metadata._continue if page.metadata and page.metadata._continue else None
+                if not _cont:
+                    break
+            except ApiException:
+                break
+        return found
+
+    def _describe_detail(pod) -> list:
+        lines = []
+        phase    = pod.status.phase or "Unknown"
+        restarts = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
+        ready    = sum(1 for cs in (pod.status.container_statuses or []) if cs.ready)
+        tot      = len(pod.spec.containers)
+        lines.append(f"  Phase: {phase} | Ready: {ready}/{tot} | Total restarts: {restarts}")
+
+        bad_conds = [(c.type, c.reason or "", c.message or "")
+                     for c in (pod.status.conditions or []) if c.status != "True"]
+        if bad_conds:
+            lines.append("  Conditions:")
+            for ctype, reason, msg in bad_conds:
+                lines.append(f"    {ctype}: {reason} — {msg}" if reason or msg else f"    {ctype}: False")
+
+        lines.append("  Containers:")
+        for cs in (pod.status.container_statuses or []):
+            state_dict = cs.state.to_dict() if cs.state else {}
+            state_key  = next((k for k, v in state_dict.items() if v), "unknown")
+            state_val  = state_dict.get(state_key) or {}
+            reason     = state_val.get("reason", "")
+            message    = state_val.get("message", "")
+            exit_code  = state_val.get("exit_code", "")
+            lines.append(f"    [{cs.name}] ready={cs.ready} state={state_key} restarts={cs.restart_count}"
+                         + (f" reason={reason}" if reason else "")
+                         + (f" exit_code={exit_code}" if exit_code != "" else ""))
+            if message:
+                for mline in message.strip().splitlines()[:5]:
+                    lines.append(f"      {mline}")
+            if cs.last_state and cs.last_state.terminated:
+                lt = cs.last_state.terminated
+                lines.append(f"      Last exit: code={lt.exit_code} reason={lt.reason}"
+                              + (f" message={lt.message.strip()[:200]}" if lt.message else ""))
+
+        for c in (pod.spec.containers or []):
+            req = (c.resources.requests or {}) if c.resources else {}
+            lim = (c.resources.limits   or {}) if c.resources else {}
+            if req or lim:
+                lines.append(f"    [{c.name}] resources: "
+                              f"requests=cpu:{req.get('cpu','none')}/mem:{req.get('memory','none')} "
+                              f"limits=cpu:{lim.get('cpu','none')}/mem:{lim.get('memory','none')}")
+
+        events = []
+        try:
+            ev = _core.list_namespaced_event(
+                namespace=pod.metadata.namespace,
+                field_selector=f"involvedObject.name={pod.metadata.name}")
+            warning_events = sorted(
+                [e for e in ev.items if e.type == "Warning"],
+                key=lambda e: (e.last_timestamp or e.event_time or _dt.datetime.min.replace(tzinfo=timezone.utc)),
+                reverse=True)
+            for e in warning_events[:5]:
+                events.append(f"    [{e.reason}] {e.message}")
+        except ApiException:
+            pass
+        if events:
+            lines.append("  Warning events:")
+            lines.extend(events)
+
+        return lines
+
+    def _get_logs(pod_name: str, ns: str) -> str:
+        try:
+            logs = _core.read_namespaced_pod_log(
+                name=pod_name, namespace=ns,
+                tail_lines=20, timestamps=False,
+                previous=False)
+            if logs and logs.strip():
+                return logs.strip()
+        except ApiException:
+            pass
+        try:
+            logs = _core.read_namespaced_pod_log(
+                name=pod_name, namespace=ns,
+                tail_lines=20, timestamps=False,
+                previous=True)
+            if logs and logs.strip():
+                return "(previous container)\n" + logs.strip()
+        except ApiException:
+            pass
+        return ""
+
+    try:
+        unhealthy = _collect_unhealthy()
+    except Exception as e:
+        return f"[ERROR] Failed to collect unhealthy pods: {e}"
+
+    if not unhealthy:
+        scope = f"namespace '{namespace}'" if namespace != "all" else "all namespaces"
+        return f"No unhealthy pods found in {scope}."
+
+    out = [f"Unhealthy pods ({len(unhealthy)}) — detailed diagnosis:\n"]
+
+    for pod in unhealthy:
+        ns_name  = pod.metadata.namespace
+        pod_name = pod.metadata.name
+        out.append(f"{'='*70}")
+        out.append(f"POD: {ns_name}/{pod_name}")
+        out.extend(_describe_detail(pod))
+
+        logs = _get_logs(pod_name, ns_name)
+        if logs:
+            out.append("  Recent logs (last 20 lines):")
+            for line in logs.splitlines()[-20:]:
+                out.append(f"    {line}")
+        else:
+            out.append("  Logs: none available")
+        out.append("")
+
+    return "\n".join(out)
+
 def get_node_health() -> str:
     try:
         nodes = _core.list_node()
@@ -2916,6 +3065,25 @@ K8S_TOOLS: dict = {
                 "description": "Kubernetes namespace to summarise resources for.",
             },
         },
+    },
+}
+
+K8S_TOOLS["get_unhealthy_pods_detail"] = {
+    "fn":          get_unhealthy_pods_detail,
+    "description": (
+        "Deep-diagnose all unhealthy pods in a namespace (or cluster-wide). "
+        "For every unhealthy pod this tool: (1) collects phase, readiness, restart count, "
+        "failed conditions with reasons and messages, container state with exit codes, "
+        "resource requests/limits, and recent Warning events from the cluster; "
+        "(2) fetches the last 20 lines of current logs, falling back to previous-container logs "
+        "if the current container has no output. "
+        "Use this tool — instead of get_pod_status — whenever the user asks WHY pods are failing, "
+        "wants a root cause, asks to 'elaborate', 'explain', 'diagnose', 'investigate', or says "
+        "'pods in trouble', 'what is wrong', 'what caused', or any phrasing that needs more than "
+        "a status summary."
+    ),
+    "parameters": {
+        "namespace": {"type": "string", "default": "all"},
     },
 }
 

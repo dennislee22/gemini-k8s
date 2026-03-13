@@ -10,6 +10,7 @@ NEVER_BYPASS = {
     "get_resource_quotas",
     "get_pv_usage",
     "get_coredns_health",
+    "get_unhealthy_pods_detail",
 }
 
 BYPASSABLE_TOOLS = {

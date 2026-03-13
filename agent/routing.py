@@ -65,6 +65,19 @@ def default_tools_for(user_msg: str) -> list:
                                "events across", "events in the cluster"]):
         return [("get_events", {"namespace": ns, "warning_only": True})]
 
+    is_pod_detail_query = (
+        any(k in lm for k in [
+            "why", "reason", "cause", "elaborate", "explain",
+            "diagnose", "investigate", "root cause", "what is wrong",
+            "what's wrong", "whats wrong", "what went wrong",
+            "in trouble", "troubleshoot", "tell me more", "more detail",
+            "more info", "give detail", "give more",
+        ])
+        and any(k in lm for k in ["pod", "pods", "container", "containers"])
+    )
+    if is_pod_detail_query:
+        return [("get_unhealthy_pods_detail", {"namespace": ns})]
+
     is_pod_output_query = (
         any(k in lm for k in ["output of", "show me the output", "show output",
                                "display output", "kubectl get pod", "get pods output",
