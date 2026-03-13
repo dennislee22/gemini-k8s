@@ -756,6 +756,239 @@ def get_persistent_volumes() -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
+def get_pv_usage(threshold: int = 80) -> str:
+    from kubernetes.stream import stream as _k8s_stream
+
+    def _parse_storage_to_gib(s: str) -> float:
+        s = s.strip()
+        try:
+            if s.endswith("Ti"): return float(s[:-2]) * 1024
+            if s.endswith("Gi"): return float(s[:-2])
+            if s.endswith("Mi"): return float(s[:-2]) / 1024
+            if s.endswith("Ki"): return float(s[:-2]) / (1024 * 1024)
+            if s.endswith("T"):  return float(s[:-1]) * 1000
+            if s.endswith("G"):  return float(s[:-1])
+            if s.endswith("M"):  return float(s[:-1]) / 1000
+        except ValueError:
+            pass
+        return 0.0
+
+    def _exec_df(pod_name: str, namespace: str, mount_path: str) -> str:
+        try:
+            resp = _k8s_stream(
+                _core.connect_get_namespaced_pod_exec,
+                pod_name, namespace,
+                command=["/bin/sh", "-c", f"df -k {mount_path} 2>/dev/null | tail -1"],
+                stderr=False, stdin=False, stdout=True, tty=False,
+                _preload_content=True,
+            )
+            return resp.strip() if isinstance(resp, str) else ""
+        except Exception:
+            return ""
+
+    try:
+        pvcs = _core.list_persistent_volume_claim_for_all_namespaces()
+        pvs  = {pv.metadata.name: pv for pv in _core.list_persistent_volume().items}
+    except ApiException as e:
+        return f"K8s API error: {e.reason}"
+
+    results = []
+    errors  = []
+
+    for pvc in pvcs.items:
+        if pvc.status.phase != "Bound":
+            continue
+
+        pvc_name  = pvc.metadata.name
+        ns        = pvc.metadata.namespace
+        vol_name  = pvc.spec.volume_name or ""
+        cap_str   = (pvc.status.capacity or {}).get("storage", "")
+        cap_gib   = _parse_storage_to_gib(cap_str)
+
+        pv = pvs.get(vol_name)
+        sc = pvc.spec.storage_class_name or "none"
+
+        try:
+            pods = _core.list_namespaced_pod(namespace=ns)
+        except ApiException:
+            continue
+
+        pod_hit = None
+        mount_path = None
+        for pod in pods.items:
+            if pod.status.phase != "Running":
+                continue
+            for vol in (pod.spec.volumes or []):
+                if vol.persistent_volume_claim and vol.persistent_volume_claim.claim_name == pvc_name:
+                    for container in (pod.spec.containers or []):
+                        for vm in (container.volume_mounts or []):
+                            if vm.name == vol.name:
+                                pod_hit    = pod.metadata.name
+                                mount_path = vm.mount_path
+                                break
+                        if pod_hit:
+                            break
+                if pod_hit:
+                    break
+
+        if not pod_hit or not mount_path:
+            errors.append(f"  {ns}/{pvc_name}: no running pod found with this PVC mounted — skipped")
+            continue
+
+        df_out = _exec_df(pod_hit, ns, mount_path)
+        if not df_out:
+            errors.append(f"  {ns}/{pvc_name}: df exec failed on pod {pod_hit} — skipped")
+            continue
+
+        parts = df_out.split()
+        if len(parts) < 5:
+            errors.append(f"  {ns}/{pvc_name}: unexpected df output: {df_out!r} — skipped")
+            continue
+
+        try:
+            used_kb  = int(parts[2])
+            avail_kb = int(parts[3])
+            total_kb = used_kb + avail_kb
+            pct      = round((used_kb / total_kb) * 100, 1) if total_kb > 0 else 0.0
+        except (ValueError, ZeroDivisionError):
+            errors.append(f"  {ns}/{pvc_name}: could not parse df numbers from: {df_out!r}")
+            continue
+
+        used_gib  = round(used_kb  / (1024 * 1024), 2)
+        avail_gib = round(avail_kb / (1024 * 1024), 2)
+        total_gib = round(total_kb / (1024 * 1024), 2)
+
+        flag = "🔴" if pct >= 90 else ("🟠" if pct >= threshold else "🟢")
+
+        results.append((pct, (
+            f"  {flag} {ns}/{pvc_name}  {pct}% used  "
+            f"({used_gib}Gi used / {total_gib}Gi total, {avail_gib}Gi free)  "
+            f"class:{sc}  pod:{pod_hit}  mount:{mount_path}"
+        )))
+
+    results.sort(key=lambda x: x[0], reverse=True)
+
+    lines = [f"PV Storage Usage (threshold: {threshold}%):"]
+
+    nearing = [r for r in results if r[0] >= threshold]
+    ok      = [r for r in results if r[0] < threshold]
+
+    if nearing:
+        lines.append(f"\nNearing or exceeding {threshold}% capacity ({len(nearing)} PVC(s)):")
+        lines.extend(r[1] for r in nearing)
+    else:
+        lines.append(f"\nNo PVCs are at or above {threshold}% capacity.")
+
+    if ok:
+        lines.append(f"\nWithin capacity ({len(ok)} PVC(s)):")
+        lines.extend(r[1] for r in ok)
+
+    if errors:
+        lines.append(f"\nSkipped ({len(errors)} PVC(s) — no mounted pod or df unavailable):")
+        lines.extend(errors)
+
+    return "\n".join(lines)
+
+def get_coredns_health() -> str:
+    from kubernetes.stream import stream as _k8s_stream
+
+    DNS_NS = "kube-system"
+    DNS_PATTERNS = ["coredns", "core-dns", "kube-dns"]
+
+    lines = ["CoreDNS Health Check:"]
+
+    try:
+        all_pods = _core.list_namespaced_pod(namespace=DNS_NS)
+    except ApiException as e:
+        return f"K8s API error reading kube-system pods: {e.reason}"
+
+    dns_pods = [
+        p for p in all_pods.items
+        if any(pat in p.metadata.name.lower() for pat in DNS_PATTERNS)
+        and "autoscaler" not in p.metadata.name.lower()
+    ]
+    autoscaler_pods = [
+        p for p in all_pods.items
+        if any(pat in p.metadata.name.lower() for pat in DNS_PATTERNS)
+        and "autoscaler" in p.metadata.name.lower()
+    ]
+
+    if not dns_pods:
+        lines.append(f"\n  No CoreDNS pods found in '{DNS_NS}'. Check if CoreDNS is deployed.")
+        return "\n".join(lines)
+
+    lines.append(f"\n  CoreDNS pods in '{DNS_NS}':")
+    running_pods = []
+    for pod in dns_pods:
+        phase     = pod.status.phase or "Unknown"
+        ready_cs  = sum(1 for cs in (pod.status.container_statuses or []) if cs.ready)
+        total_cs  = len(pod.status.container_statuses or [])
+        restarts  = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
+        node      = pod.spec.node_name or "?"
+        flag      = "✅" if phase == "Running" and ready_cs == total_cs else "❌"
+        lines.append(
+            f"    {flag} {pod.metadata.name}  phase:{phase}  "
+            f"ready:{ready_cs}/{total_cs}  restarts:{restarts}  node:{node}"
+        )
+        if phase == "Running" and ready_cs == total_cs:
+            running_pods.append(pod)
+
+    if autoscaler_pods:
+        lines.append(f"\n  CoreDNS autoscaler:")
+        for pod in autoscaler_pods:
+            phase    = pod.status.phase or "Unknown"
+            ready_cs = sum(1 for cs in (pod.status.container_statuses or []) if cs.ready)
+            total_cs = len(pod.status.container_statuses or [])
+            restarts = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
+            flag     = "✅" if phase == "Running" and ready_cs == total_cs else "❌"
+            lines.append(
+                f"    {flag} {pod.metadata.name}  phase:{phase}  "
+                f"ready:{ready_cs}/{total_cs}  restarts:{restarts}"
+            )
+
+    try:
+        svcs = _core.list_namespaced_service(namespace=DNS_NS)
+        dns_svcs = [
+            s for s in svcs.items
+            if any(pat in s.metadata.name.lower() for pat in DNS_PATTERNS)
+        ]
+        if dns_svcs:
+            lines.append("\n  CoreDNS service(s):")
+            for svc in dns_svcs:
+                cluster_ip = svc.spec.cluster_ip or "?"
+                ports = ", ".join(
+                    f"{p.port}/{p.protocol}" for p in (svc.spec.ports or [])
+                )
+                lines.append(f"    {svc.metadata.name}  clusterIP:{cluster_ip}  ports:[{ports}]")
+        else:
+            lines.append("\n  ⚠ No CoreDNS service found in kube-system.")
+    except ApiException:
+        lines.append("\n  ⚠ Could not retrieve CoreDNS service.")
+
+    if running_pods:
+        test_pod = running_pods[0]
+        test_targets = ["kubernetes.default.svc.cluster.local", "kube-dns.kube-system.svc.cluster.local"]
+        lines.append("\n  DNS resolution test (nslookup from CoreDNS pod):")
+        for target in test_targets:
+            try:
+                resp = _k8s_stream(
+                    _core.connect_get_namespaced_pod_exec,
+                    test_pod.metadata.name, DNS_NS,
+                    command=["/bin/sh", "-c", f"nslookup {target} 2>&1 || echo FAILED"],
+                    stderr=False, stdin=False, stdout=True, tty=False,
+                    _preload_content=True,
+                )
+                output = (resp.strip() if isinstance(resp, str) else "").replace("\n", " ")
+                ok = "FAILED" not in output and "can't resolve" not in output.lower() and "error" not in output.lower()
+                flag = "✅" if ok else "❌"
+                lines.append(f"    {flag} {target}: {'resolved' if ok else output[:120]}")
+            except Exception as exc:
+                lines.append(f"    ⚠ {target}: exec failed — {exc}")
+    else:
+        lines.append("\n  ⚠ DNS resolution test skipped — no running CoreDNS pod available.")
+
+    return "\n".join(lines)
+
 def get_service_status(namespace: str = "all") -> str:
     try:
         svcs = (_core.list_service_for_all_namespaces()
@@ -2682,6 +2915,37 @@ K8S_TOOLS: dict = {
                 "type": "string",
                 "description": "Kubernetes namespace to summarise resources for.",
             },
+        },
+    },
+}
+
+K8S_TOOLS["get_coredns_health"] = {
+    "fn":          get_coredns_health,
+    "description": (
+        "Check CoreDNS health in the cluster. Finds CoreDNS pods in kube-system (handles standard, "
+        "RKE2 rke2-coredns-*, and other distributions), reports pod phase/readiness/restarts, "
+        "checks the CoreDNS ClusterIP service, and runs a live nslookup DNS resolution test from "
+        "inside a CoreDNS pod to verify that internal cluster service resolution is working. "
+        "Use this for any query about CoreDNS, DNS resolution, pod DNS, service discovery, "
+        "or whether pods can resolve internal cluster services."
+    ),
+    "parameters": {},
+}
+
+K8S_TOOLS["get_pv_usage"] = {
+    "fn":          get_pv_usage,
+    "description": (
+        "Check actual disk usage of all bound PersistentVolumeClaims by exec-ing df into the "
+        "pod that has each PVC mounted. Returns used/total/free GiB and usage percentage per PVC, "
+        "sorted by usage descending. Use this tool for any query about storage capacity, "
+        "PVs/PVCs nearing full, disk usage, storage running out, or which volumes are almost full. "
+        "threshold controls the warning level (default 80%)."
+    ),
+    "parameters": {
+        "threshold": {
+            "type": "integer",
+            "default": 80,
+            "description": "Percentage threshold above which a PVC is flagged as nearing capacity (default: 80).",
         },
     },
 }

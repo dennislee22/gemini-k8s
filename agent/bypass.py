@@ -8,6 +8,8 @@ NEVER_BYPASS = {
     "get_job_status",
     "get_hpa_status",
     "get_resource_quotas",
+    "get_pv_usage",
+    "get_coredns_health",
 }
 
 BYPASSABLE_TOOLS = {
@@ -62,6 +64,8 @@ ALWAYS_SYNTHESISE = (
 NS_SPECIFIED_KEYWORDS = (
     "namespace", " ns=", " ns ", "cdp", "cmlwb", "longhorn",
     "vault", "cattle", "rancher", "cert", "default namespace",
+    "coredns", "kube-system", "dns", "kube-proxy", "etcd",
+    "scheduler", "controller", "apiserver",
 )
 
 NS_SCOPED_TOOLS = {

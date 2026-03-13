@@ -1,11 +1,22 @@
 import re
 
 NS_ALIASES = {
-    "vault":    "vault-system",
-    "longhorn": "longhorn-system",
-    "cattle":   "cattle-system",
-    "rancher":  "cattle-system",
-    "cert":     "cert-manager",
+    "vault":      "vault-system",
+    "longhorn":   "longhorn-system",
+    "cattle":     "cattle-system",
+    "rancher":    "cattle-system",
+    "cert":       "cert-manager",
+    "coredns":    "kube-system",
+    "core-dns":   "kube-system",
+    "dns":        "kube-system",
+    "kube-proxy": "kube-system",
+    "kubedns":    "kube-system",
+    "kube-dns":   "kube-system",
+    "etcd":       "kube-system",
+    "scheduler":  "kube-system",
+    "controller": "kube-system",
+    "apiserver":  "kube-system",
+    "api-server": "kube-system",
 }
 
 def resolve_namespace(lm: str) -> str:
@@ -128,6 +139,30 @@ def default_tools_for(user_msg: str) -> list:
 
     if any(k in lm for k in ["hpa", "autoscal", "horizontal pod"]):
         return [("get_hpa_status", {"namespace": ns})]
+
+    is_dns_query = any(k in lm for k in [
+        "coredns", "core-dns", "kube-dns", "kubedns",
+        "dns resolution", "dns resolv", "resolve service", "resolve internal",
+        "service discovery", "pod.*resolv", "resolv.*pod",
+        "internal.*dns", "dns.*internal", "cluster dns",
+        "nslookup", "dns lookup", "dns working", "dns health",
+        "dns running", "dns issue", "dns problem",
+    ])
+    if is_dns_query:
+        return [("get_coredns_health", {})]
+
+    is_pv_usage_query = any(k in lm for k in [
+        "nearing", "almost full", "running out", "near full", "storage usage",
+        "disk usage", "how full", "pv usage", "pvc usage", "volume usage",
+        "storage capacity", "capacity usage", "percent full", "percent used",
+        "storage left", "storage remaining", "filling up", "nearly full",
+    ])
+    if is_pv_usage_query:
+        threshold = 80
+        m = re.search(r'(\d+)\s*%', lm)
+        if m:
+            threshold = int(m.group(1))
+        return [("get_pv_usage", {"threshold": threshold})]
 
     is_access_mode_query = any(k in lm for k in [
         "rwo", "rwx", "rox", "rwop", "access mode", "readwriteonce",
