@@ -123,6 +123,7 @@ Examples:
 → get_pvc_status — for listing PVCs, their bound status, access modes, and storage class.
 → get_persistent_volumes — for raw PV details, reclaim policy, cross-namespace PV ownership.
 → get_pv_usage — for ANY question about disk usage, capacity, how full, nearing capacity, almost full, storage running out, percentage used.
+   Pass threshold= derived from the user's question (see tool parameter description). Default 80 if no threshold mentioned.
    Examples: "which PVs are nearing capacity", "is storage running out", "how full are the volumes", "any PVC above 80%" → ALL use get_pv_usage, NOT get_pvc_status.
 
 **Secrets / credentials / certificates**:

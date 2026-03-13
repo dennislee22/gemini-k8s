@@ -3327,7 +3327,12 @@ K8S_TOOLS["get_pv_usage"] = {
         "threshold": {
             "type": "integer",
             "default": 80,
-            "description": "Percentage threshold above which a PVC is flagged as nearing capacity (default: 80).",
+            "description": (
+                "Minimum usage percentage to include in results. "
+                "Extract this from the user's question — if they say 'above 30%' use 30, "
+                "'more than 1%' use 1, 'any usage' or 'all' use 0. "
+                "Default 80 when no threshold is mentioned."
+            ),
         },
     },
 }

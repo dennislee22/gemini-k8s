@@ -8,7 +8,6 @@ NEVER_BYPASS = {
     "get_job_status",
     "get_hpa_status",
     "get_resource_quotas",
-    "get_pv_usage",
     "get_coredns_health",
     "get_unhealthy_pods_detail",
 }
@@ -16,6 +15,7 @@ NEVER_BYPASS = {
 BYPASSABLE_TOOLS = {
     "get_namespace_status",
     "get_persistent_volumes",
+    "get_pv_usage",
     "get_cluster_role_bindings",
     "get_service_accounts",
     "get_pod_status",
@@ -101,6 +101,10 @@ def should_bypass_llm(tool_name: str, args: dict,
         "no pods found",
     )
     if any(p in output.lower() for p in _SUMMARY_PATTERNS):
+        return True
+
+    # get_pv_usage output is a structured report — always bypass directly
+    if tool_name == "get_pv_usage":
         return True
 
     if any(re.search(pat, lq) for pat in ALWAYS_SYNTHESISE):
