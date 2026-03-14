@@ -146,678 +146,9 @@ _log_rag = get_logger("rag")
 _log_ag  = get_logger("agent")
 
 from tools_k8s import K8S_TOOLS, _core, reload_kubeconfig
-
-CHUNK_SIZE    = 512
-CHUNK_OVERLAP = 64
-TOP_K         = 10
-
-_embedder_fn  = None
-
-_lancedb_conn  = None
-_docs_table    = None
-_excel_table   = None
-
-_EMBED_DIM = 768
-
-def _get_embedder():
-    global _embedder_fn
-    if _embedder_fn is not None:
-        return _embedder_fn
-
-    _log_rag.info(f"[Embed] Loading SentenceTransformer: {EMBED_MODEL}")
-    from sentence_transformers import SentenceTransformer
-    import transformers as _tf
-    _tf.logging.set_verbosity_error()
-
-    if NUM_GPU > 0:
-        device = "cuda"
-        try:
-            import torch
-            if not torch.cuda.is_available():
-                _log_rag.warning(
-                    "[Embed] NUM_GPU=%d but torch.cuda.is_available()=False "
-                    "(CUDA runtime issue?) — falling back to CPU", NUM_GPU
-                )
-                device = "cpu"
-        except ImportError:
-            pass
-    else:
-        device = "cpu"
-
-    _log_rag.info(f"[Embed] device={device} (NUM_GPU={NUM_GPU})")
-    _st = SentenceTransformer(EMBED_MODEL, device=device, trust_remote_code=True)
-
-    def _local(text: str) -> list:
-        return _st.encode(text, normalize_embeddings=True).tolist()
-
-    _embedder_fn = _local
-    return _embedder_fn
-
-def embed_text(text: str) -> list:
-    return _get_embedder()(text)
-
-def _get_lancedb():
-    global _lancedb_conn, _docs_table, _excel_table
-    if _lancedb_conn is not None:
-        return _lancedb_conn, _docs_table, _excel_table
-
-    import lancedb
-    import pyarrow as pa
-
-    Path(LANCEDB_DIR).mkdir(parents=True, exist_ok=True)
-    _log_rag.info(f"[LanceDB] Opening store: {LANCEDB_DIR}")
-    _lancedb_conn = lancedb.connect(LANCEDB_DIR)
-
-    docs_schema = pa.schema([
-        pa.field("id",          pa.utf8()),
-        pa.field("vector",      pa.list_(pa.float32(), _EMBED_DIM)),
-        pa.field("text",        pa.utf8()),
-        pa.field("source",      pa.utf8()),
-        pa.field("doc_type",    pa.utf8()),
-        pa.field("chunk_index", pa.int32()),
-        pa.field("file_hash",   pa.utf8()),
-    ])
-    if "docs" in _lancedb_conn.table_names():
-        _docs_table = _lancedb_conn.open_table("docs")
-    else:
-        _docs_table = _lancedb_conn.create_table("docs", schema=docs_schema)
-        _log_rag.info("[LanceDB] Created table: docs")
-
-    excel_schema = pa.schema([
-        pa.field("id",            pa.utf8()),
-        pa.field("vector",        pa.list_(pa.float32(), _EMBED_DIM)),
-        pa.field("source_file",   pa.utf8()),
-        pa.field("file_hash",     pa.utf8()),
-        pa.field("sheet",         pa.utf8()),
-        pa.field("symptom",       pa.utf8()),
-        pa.field("issue_id",      pa.utf8()),
-        pa.field("category",      pa.utf8()),
-        pa.field("problem",       pa.utf8()),
-        pa.field("root_cause",    pa.utf8()),
-        pa.field("fix",           pa.utf8()),
-        pa.field("severity",      pa.utf8()),
-        pa.field("present",       pa.utf8()),
-        pa.field("jira",          pa.utf8()),
-        pa.field("discovered",    pa.utf8()),
-        pa.field("resolved",      pa.utf8()),
-        pa.field("notes",         pa.utf8()),
-        pa.field("do_text",       pa.utf8()),
-        pa.field("dont_text",     pa.utf8()),
-        pa.field("rationale",     pa.utf8()),
-        pa.field("prerequisite",  pa.utf8()),
-        pa.field("how_to_verify", pa.utf8()),
-        pa.field("learning",      pa.utf8()),
-        pa.field("action_taken",  pa.utf8()),
-    ])
-    if "excel_issues" in _lancedb_conn.table_names():
-        _excel_table = _lancedb_conn.open_table("excel_issues")
-    else:
-        _excel_table = _lancedb_conn.create_table("excel_issues", schema=excel_schema)
-        _log_rag.info("[LanceDB] Created table: excel_issues")
-
-    return _lancedb_conn, _docs_table, _excel_table
-
-def init_db():
-    _get_lancedb()
-    _get_embedder()
-
-def chunk_text(text: str) -> list:
-    chunks, start = [], 0
-    text = text.strip()
-    while start < len(text):
-        end = start + CHUNK_SIZE
-        if end < len(text):
-            pb = text.rfind("\n\n", start, end)
-            if pb > start + CHUNK_SIZE // 2:
-                end = pb
-            else:
-                sb = max(text.rfind(". ", start, end), text.rfind(".\n", start, end))
-                if sb > start + CHUNK_SIZE // 2:
-                    end = sb + 1
-        chunk = text[start:end].strip()
-        if chunk: chunks.append(chunk)
-        start = end - CHUNK_OVERLAP
-    return chunks
-
-def _doc_type(filename: str) -> str:
-    n = filename.lower()
-    if any(k in n for k in ["known", "issue", "bug", "error"]):   return "known_issue"
-    if any(k in n for k in ["runbook", "playbook", "procedure"]): return "runbook"
-    if any(k in n for k in ["dos", "donts", "guidelines"]):       return "dos_donts"
-    return "general"
-
-def ingest_file(file_path: str, force: bool = False) -> dict:
-    path  = Path(file_path)
-    fhash = hashlib.md5(path.read_bytes()).hexdigest()
-    _, docs_tbl, _ = _get_lancedb()
-
-    if not force:
-        try:
-            existing = docs_tbl.search().where(
-                f"source = '{str(path)}' AND file_hash = '{fhash}'"
-            ).limit(1).to_list()
-            if existing:
-                _log_rag.info(f"[RAG] Skip (unchanged): {path.name}")
-                return {"file": path.name, "status": "skipped", "chunks": 0}
-        except Exception:
-            pass
-
-    try:
-        suffix = path.suffix.lower()
-        if suffix == ".pdf":
-            from pypdf import PdfReader
-            text = "\n\n".join(p.extract_text() or "" for p in PdfReader(str(path)).pages)
-        elif suffix == ".md":
-            from markdown_it import MarkdownIt
-            html = MarkdownIt().render(path.read_text(encoding="utf-8"))
-            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
-        else:
-            text = path.read_text(encoding="utf-8")
-    except Exception as e:
-        return {"file": path.name, "status": "error", "chunks": 0, "error": str(e)}
-
-    if not text.strip(): return {"file": path.name, "status": "empty", "chunks": 0}
-
-    chunks   = chunk_text(text)
-    doc_type = _doc_type(path.name)
-    _log_rag.info(f"[RAG] {path.name}: {len(chunks)} chunks  type={doc_type}")
-
-    try:
-        docs_tbl.delete(f"source = '{str(path)}'")
-    except Exception:
-        pass
-
-    rows = []
-    for i, ch in enumerate(chunks):
-        rows.append({
-            "id":          f"{fhash}_{i}",
-            "vector":      embed_text(ch),
-            "text":        ch,
-            "source":      str(path),
-            "doc_type":    doc_type,
-            "chunk_index": i,
-            "file_hash":   fhash,
-        })
-    docs_tbl.add(rows)
-    return {"file": path.name, "status": "ingested", "chunks": len(chunks), "doc_type": doc_type}
-
-
-# ── Schema-agnostic column resolver ─────────────────────────────────────────
-# Maps logical field roles to ordered keyword hints matched against actual
-# column header text (case-insensitive, substring match).
-# First matching column wins.  Multiple hints = multiple fallback names.
-
-_SHEET_ROLES = {
-    "Known Issues": {
-        "symptom":    ["symptom", "observable", "error message", "what breaks",
-                       "description", "what happens"],
-        "problem":    ["problem", "summary", "title", "issue name",
-                       "incident summary", "description"],
-        "root_cause": ["root cause", "cause", "reason", "why", "root"],
-        "fix":        ["remediation", "fix", "resolution", "solution",
-                       "how to fix", "steps", "corrective"],
-        "issue_id":   ["issue id", "id", "ticket", "issue #", "#"],
-        "category":   ["category", "type", "component", "area"],
-        "severity":   ["severity", "priority", "impact", "level"],
-        "present":    ["present", "unresolved", "open", "active", "status"],
-        "jira":       ["jira", "ticket", "postmortem", "link", "url"],
-        "discovered": ["discovered", "found", "created", "reported", "date",
-                       "incident date"],
-        "resolved":   ["resolved", "closed", "fixed date"],
-        "notes":      ["notes", "lessons", "comments", "additional",
-                       "remarks", "observation"],
-    },
-    "Dos and Donts": {
-        "do_text":    ["do", "should", "recommended", "best practice",
-                       "correct", "✅", "yes", "good"],
-        "dont_text":  ["don", "avoid", "never", "not", "incorrect",
-                       "wrong", "❌", "bad", "prohibited"],
-        "rationale":  ["rationale", "reason", "why", "explanation",
-                       "impact", "because"],
-        "category":   ["category", "type", "area", "component"],
-        "jira":       ["jira", "related", "ticket", "issue", "link"],
-    },
-    "Prerequisites": {
-        "prerequisite": ["prerequisite", "requirement", "condition",
-                         "must have", "needed", "dependency", "what"],
-        "rationale":    ["why", "matters", "reason", "rationale",
-                         "impact", "importance", "because"],
-        "how_to_verify": ["verify", "check", "validate", "confirm",
-                          "how to", "test", "proof"],
-        "category":     ["category", "type", "area", "component"],
-    },
-    "Past Learnings": {
-        "problem":    ["incident", "summary", "what happened", "event",
-                       "description", "title", "subject"],
-        "root_cause": ["went wrong", "cause", "reason", "why", "root",
-                       "potential cause", "failure"],
-        "fix":        ["worked well", "resolution", "fix", "solution",
-                       "corrective", "action", "potential resolution",
-                       "key learning", "learning"],
-        "learning":   ["learning", "lesson", "takeaway", "insight",
-                       "key learning", "potential resolution",
-                       "what we learned"],
-        "action_taken": ["action", "taken", "implemented", "change",
-                          "what was done", "resolution", "potential resolution"],
-        "present":    ["prevented", "recurrence", "recur", "status",
-                       "resolved", "fixed"],
-        "jira":       ["jira", "postmortem", "ticket", "link", "url"],
-        "discovered": ["date", "incident date", "when", "discovered",
-                       "occurred"],
-    },
-}
-
-# Columns that are typically row numbers / index columns — skip for search
-_INDEX_HINTS = {"#", "no", "num", "index", "row", "sl no", "s.no"}
-
-def _resolve_col(row: dict, *hints: str, cols: list = None) -> str:
-    """Return first non-empty value from row whose column name (lowercased)
-    contains any of the hint substrings.  cols = actual column list for order."""
-    search_cols = cols or list(row.keys())
-    for hint in hints:
-        hint_l = hint.lower()
-        for col in search_cols:
-            if hint_l in col.lower() and row.get(col, "").strip():
-                return row[col].strip()
-    return ""
-
-def _best_col(row: dict, role_hints: list, cols: list) -> str:
-    """Resolve a single role from ordered hints list."""
-    return _resolve_col(row, *role_hints, cols=cols)
-
-def _all_values(row: dict, cols: list, exclude_roles: set) -> str:
-    """Concatenate all non-empty column values not matched to excluded roles,
-    as a fallback search vector when primary columns are absent."""
-    parts = []
-    for col in cols:
-        col_l = col.lower().strip()
-        # Skip index/number columns
-        if col_l in _INDEX_HINTS or col_l.rstrip(".") in _INDEX_HINTS:
-            continue
-        # Skip columns already included in the primary vector
-        if any(hint in col_l for role in exclude_roles
-               for hint in _SHEET_ROLES.get(role, {}).get("symptom", [])):
-            continue
-        v = str(row.get(col, "")).strip()
-        if v and v.lower() not in ("none", "nan", "n/a", "-", ""):
-            parts.append(v)
-    return " / ".join(parts)
-
-def _warn_unmatched(sn: str, cols: list, matched: set, log_fn):
-    """Log columns that could not be mapped to any known role."""
-    unmatched = [
-        c for c in cols
-        if c not in matched
-        and c.lower().strip() not in _INDEX_HINTS
-        and c.lower().strip().rstrip(".") not in _INDEX_HINTS
-    ]
-    if unmatched:
-        log_fn(f"[RAG/Excel] Sheet '{sn}' — unrecognised columns (stored as-is): {unmatched}")
-
-def _map_row(row: dict, sheet_type: str, cols: list) -> dict:
-    """Map a raw Excel row to the canonical field dict using semantic hints.
-    Falls back to concatenating all values if primary search fields are empty."""
-    roles = _SHEET_ROLES.get(sheet_type, {})
-    resolved = {role: _best_col(row, hints, cols) for role, hints in roles.items()}
-
-    # Build primary search vector from the most semantically rich fields
-    if sheet_type == "Known Issues":
-        primary = resolved.get("symptom", "") or resolved.get("problem", "")
-        # Augment with problem if symptom alone is sparse
-        secondary = resolved.get("problem", "") if primary else ""
-        search_text = " / ".join(t for t in [primary, secondary] if t).strip(" /")
-
-    elif sheet_type == "Dos and Donts":
-        search_text = " / ".join(
-            t for t in [resolved.get("do_text",""), resolved.get("dont_text","")]
-            if t
-        ).strip(" /")
-
-    elif sheet_type == "Prerequisites":
-        search_text = resolved.get("prerequisite", "")
-
-    else:  # Past Learnings
-        search_text = " / ".join(
-            t for t in [
-                resolved.get("problem",""),
-                resolved.get("root_cause",""),
-                resolved.get("fix","") or resolved.get("learning",""),
-            ] if t
-        ).strip(" /")
-
-    # Last resort: if still empty, use all column values
-    if not search_text:
-        search_text = _all_values(row, cols, exclude_roles=set())
-
-    return resolved, search_text
-# ── End schema-agnostic resolver ─────────────────────────────────────────────
-
-def ingest_excel(file_path: str, force: bool = False) -> dict:
-    try:
-        import pandas as pd
-    except ImportError:
-        return {"file": Path(file_path).name, "status": "error", "chunks": 0,
-                "error": "pandas not installed — pip install pandas openpyxl"}
-
-    path  = Path(file_path)
-    fhash = hashlib.md5(path.read_bytes()).hexdigest()
-    _, _, excel_tbl = _get_lancedb()
-
-    def _s(val) -> str:
-        if val is None: return ""
-        try:
-            import math
-            if isinstance(val, float) and math.isnan(val): return ""
-        except Exception:
-            pass
-        return str(val).strip()
-
-    rows  = []
-    total = 0
-
-    try:
-        xl = pd.read_excel(str(path), sheet_name=None, dtype=str)
-    except Exception as e:
-        return {"file": path.name, "status": "error", "chunks": 0, "error": str(e)}
-
-    for sheet_name, df in xl.items():
-        sn   = sheet_name.strip()
-        df.columns = [c.strip() for c in df.columns]
-
-        # ── Sheet type detection ──────────────────────────────────────────────
-        sn_l = sn.lower()
-        if "known" in sn_l or "issue" in sn_l:
-            sheet_type = "Known Issues"
-            id_prefix  = "ki"
-        elif "dos" in sn_l or "don" in sn_l or "donts" in sn_l or "practice" in sn_l:
-            sheet_type = "Dos and Donts"
-            id_prefix  = "dd"
-        elif "prereq" in sn_l or "prerequisite" in sn_l or "requirement" in sn_l:
-            sheet_type = "Prerequisites"
-            id_prefix  = "pr"
-        elif "learn" in sn_l or "past" in sn_l or "incident" in sn_l or "postmortem" in sn_l:
-            sheet_type = "Past Learnings"
-            id_prefix  = "pl"
-        else:
-            _log_rag.info(f"[RAG/Excel] Skipping unrecognised sheet '{sn}'")
-            continue
-
-        _log_rag.info(f"[RAG/Excel] Sheet '{sn}' → {sheet_type} ({len(df)} rows)")
-        cols = list(df.columns)
-
-        matched_cols = set()
-        for role, hints in _SHEET_ROLES.get(sheet_type, {}).items():
-            for hint in hints:
-                for col in cols:
-                    if hint.lower() in col.lower():
-                        matched_cols.add(col)
-
-        _warn_unmatched(sn, cols, matched_cols, _log_rag.warning)
-
-        for _, raw_row in df.iterrows():
-            row = {col: (str(v).strip() if v is not None else "")
-                   for col, v in raw_row.items()}
-            # Normalise nan/None values
-            row = {k: ("" if v.lower() in ("none","nan","n/a","-","nat") else v)
-                   for k, v in row.items()}
-
-            resolved, search_text = _map_row(row, sheet_type, cols)
-            if not search_text:
-                continue
-
-            rows.append({
-                "id":          f"{id_prefix}-{fhash}-{total}",
-                "vector":      embed_text(search_text),
-                "source_file": path.name,
-                "file_hash":   fhash,
-                "sheet":       sheet_type,
-                "symptom":     search_text,
-                # Canonical fields — populated from resolved roles where available
-                "issue_id":    resolved.get("issue_id",    ""),
-                "category":    resolved.get("category",    ""),
-                "problem":     resolved.get("problem",     ""),
-                "root_cause":  resolved.get("root_cause",  ""),
-                "fix":         resolved.get("fix",         ""),
-                "severity":    resolved.get("severity",    ""),
-                "present":     resolved.get("present",     ""),
-                "jira":        resolved.get("jira",        ""),
-                "discovered":  resolved.get("discovered",  ""),
-                "resolved":    resolved.get("resolved",    ""),
-                "notes":       resolved.get("notes",       ""),
-                "do_text":     resolved.get("do_text",     ""),
-                "dont_text":   resolved.get("dont_text",   ""),
-                "rationale":   resolved.get("rationale",   ""),
-                "prerequisite": resolved.get("prerequisite",""),
-                "how_to_verify": resolved.get("how_to_verify",""),
-                "learning":    resolved.get("learning",    ""),
-                "action_taken": resolved.get("action_taken",""),
-            })
-            total += 1
-
-    if not rows:
-        return {"file": path.name, "status": "empty", "chunks": 0}
-
-    try:
-        excel_tbl.delete(f"id LIKE 'ki-{fhash}%' OR id LIKE 'dd-{fhash}%' OR id LIKE 'pr-{fhash}%' OR id LIKE 'pl-{fhash}%'")
-    except Exception:
-        pass
-
-    excel_tbl.add(rows)
-    _log_rag.info(f"[RAG/Excel] {path.name}: {total} rows ingested")
-    return {"file": path.name, "status": "ingested", "chunks": total, "doc_type": "excel"}
-
-def ingest_directory(docs_dir: str, force: bool = False) -> list:
-    p = Path(docs_dir)
-    results = []
-    for f in sorted(p.glob("**/*.md")) + sorted(p.glob("**/*.pdf")) + sorted(p.glob("**/*.txt")):
-        results.append(ingest_file(str(f), force=force))
-    for f in sorted(p.glob("**/*.xlsx")) + sorted(p.glob("**/*.xls")):
-        results.append(ingest_excel(str(f), force=force))
-    return results
-
-def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
-                 sheet: Optional[str] = None) -> str:
-    _, docs_tbl, excel_tbl = _get_lancedb()
-    sections = []
-
-    _SHEET_ALIASES = {
-        "dos":          "Dos and Donts",
-        "donts":        "Dos and Donts",
-        "dos and donts": "Dos and Donts",
-        "dos & donts":  "Dos and Donts",
-        "known issues": "Known Issues",
-        "known":        "Known Issues",
-        "issues":       "Known Issues",
-        "prerequisites": "Prerequisites",
-        "prereq":       "Prerequisites",
-        "past learnings": "Past Learnings",
-        "learnings":    "Past Learnings",
-        "past":         "Past Learnings",
-    }
-    if sheet:
-        sheet = _SHEET_ALIASES.get(sheet.lower().strip(), sheet)
-
-    try:
-        excel_count = excel_tbl.count_rows()
-    except Exception:
-        excel_count = 0
-
-    if excel_count > 0:
-        try:
-            qvec = embed_text(query)
-            sheet_filter = f"sheet = '{sheet}'" if sheet else None
-
-            # Single search pass across ALL sheets — no Known Issues priority bias.
-            # When no sheet filter is given, every sheet is searched equally so the
-            # best semantic match wins regardless of which table it comes from.
-            # Unresolved Known Issues are still highlighted visually in the output,
-            # but they are NOT artificially promoted in ranking.
-            _aq = excel_tbl.search(qvec, vector_column_name="vector")
-            if sheet_filter:
-                _aq = _aq.where(sheet_filter)
-            # Fetch extra candidates so de-duplication leaves us with top_k
-            all_hits = _aq.limit(top_k * 2).to_list()
-
-            # De-duplicate by id, preserve score order (LanceDB returns by distance asc)
-            seen, merged = set(), []
-            for r in all_hits:
-                if r["id"] not in seen:
-                    seen.add(r["id"])
-                    merged.append(r)
-            merged = merged[:top_k]
-
-            if merged:
-                lines = [f"📋 Knowledge Base ({len(merged)} match(es)):\n"]
-                for hit in merged:
-                    sheet = hit.get("sheet", "")
-                    sim   = round(1 - hit.get("_distance", 1.0), 3)
-                    if sheet == "Known Issues":
-                        status = "⚠️ UNRESOLVED" if hit.get("present") == "Yes" else "✅ Resolved"
-                        jira   = hit.get("jira", "")
-                        lines.append(
-                            f"[{sheet}] {hit.get('issue_id','')} | {hit.get('severity','')} | {status}"
-                            + (f" | {jira}" if jira else "") + f" | relevance:{sim}\n"
-                            f"  Problem  : {hit.get('problem','')}\n"
-                            f"  Symptom  : {hit.get('symptom','')}\n"
-                            f"  RootCause: {hit.get('root_cause','')}\n"
-                            f"  Fix      : {hit.get('fix','')}\n"
-                            + (f"  Notes    : {hit.get('notes','')}\n" if hit.get("notes") else "")
-                        )
-                    elif sheet == "Dos and Donts":
-                        lines.append(
-                            f"[{sheet}] {hit.get('category','')} | relevance:{sim}\n"
-                            f"  ✅ DO   : {hit.get('do_text','')}\n"
-                            f"  ❌ DON'T: {hit.get('dont_text','')}\n"
-                            f"  Why     : {hit.get('rationale','')}\n"
-                        )
-                    elif sheet == "Prerequisites":
-                        lines.append(
-                            f"[{sheet}] {hit.get('category','')} | relevance:{sim}\n"
-                            f"  Prerequisite : {hit.get('prerequisite','')}\n"
-                            f"  Why it matters: {hit.get('rationale','')}\n"
-                            f"  How to verify : {hit.get('how_to_verify','')}\n"
-                        )
-                    elif sheet == "Past Learnings":
-                        lines.append(
-                            f"[{sheet}] {hit.get('discovered','')} | relevance:{sim}\n"
-                            f"  Incident         : {hit.get('problem','')}\n"
-                            f"  Potential Cause  : {hit.get('root_cause','')}\n"
-                            f"  Resolution/Fix   : {hit.get('fix','') or hit.get('learning','')}\n"
-                            f"  Action Taken     : {hit.get('action_taken','')}\n"
-                            + (f"  Jira             : {hit.get('jira','')}\n" if hit.get('jira') else "")
-                        )
-                    else:
-                        lines.append(f"[{sheet}] relevance:{sim}\n  {hit.get('symptom','')}\n")
-                sections.append("\n".join(lines))
-        except Exception as e:
-            _log_rag.warning(f"[RAG/Excel] Search failed: {e}")
-
-    try:
-        docs_count = docs_tbl.count_rows()
-    except Exception:
-        docs_count = 0
-
-    if docs_count > 0:
-        try:
-            qvec  = embed_text(query)
-            srch  = docs_tbl.search(qvec, vector_column_name="vector")
-            if doc_type:
-                srch = srch.where(f"doc_type = '{doc_type}'")
-            hits = srch.limit(top_k).to_list()
-            if hits:
-                lines = [f"📄 Documentation ({len(hits)} chunk(s)):\n"]
-                for hit in hits:
-                    sim = round(1 - hit.get("_distance", 1.0), 3)
-                    src = Path(hit.get("source", "?")).name
-                    lines.append(f"[{src}] relevance:{sim}\n{hit.get('text','')}\n")
-                sections.append("\n".join(lines))
-        except Exception as e:
-            _log_rag.warning(f"[RAG/Docs] Search failed: {e}")
-
-    if sections:
-        return "\n\n---\n\n".join(sections)
-    # Distinguish empty KB (nothing ingested) from a real search with no hits.
-    # excel_count and docs_count were set earlier in this function.
-    if excel_count == 0 and docs_count == 0:
-        return "KB_EMPTY: No documents have been ingested into the knowledge base."
-    return "No relevant documentation found."
-
-def get_doc_stats() -> dict:
-    try:
-        _, docs_tbl, excel_tbl = _get_lancedb()
-        docs_count  = docs_tbl.count_rows()
-        excel_count = excel_tbl.count_rows()
-        excel_by_sheet: dict = {}
-        if excel_count > 0:
-            try:
-                from collections import Counter
-                rows = excel_tbl.search().limit(excel_count + 1).to_list()
-                excel_by_sheet = dict(Counter(r.get("sheet", "unknown") for r in rows))
-            except Exception:
-                pass
-        docs_by_type: dict = {}
-        if docs_count > 0:
-            try:
-                from collections import Counter
-                rows = docs_tbl.search().limit(docs_count + 1).to_list()
-                docs_by_type = dict(Counter(r.get("doc_type", "general") for r in rows))
-            except Exception:
-                pass
-        return {
-            "total_chunks":   docs_count + excel_count,
-            "docs_chunks":    docs_count,
-            "excel_rows":     excel_count,
-            "docs_by_type":   docs_by_type,
-            "excel_by_sheet": excel_by_sheet,
-        }
-    except Exception as e:
-        return {"total_chunks": 0, "docs_chunks": 0, "excel_rows": 0,
-                "docs_by_type": {}, "excel_by_sheet": {}, "error": str(e)}
-
-RAG_TOOLS = {
-    "rag_search": {
-        "fn": rag_retrieve,
-        "description": (
-            "Search the internal knowledge base for known issues, runbooks, troubleshooting guides, "
-            "dos and don'ts, prerequisites, past learnings, and operational best practices. "
-            "Call this tool in two situations: "
-            "(1) AFTER get_unhealthy_pods_detail when a pod shows OOMKilled, CrashLoopBackOff, "
-            "ImagePullBackOff, Pending, or any error — use the specific error and component as the query. "
-            "(2) DIRECTLY when the user asks about: known issues, problems, documentation, runbooks, "
-            "best practices, dos and don'ts, prerequisites, past learnings, postmortems, or WHY "
-            "something might be happening. "
-            "Call rag_search BEFORE live tools when query contains 'issues', 'problems', "
-            "'known issues', 'what could cause', 'best practice', 'how to fix'. "
-            "Call live tools BEFORE rag_search when query is about current cluster state "
-            "('is X healthy', 'how many pods', 'list pvcs'). "
-            "Pass sheet= ONLY when the user explicitly asks for a specific category. "
-            "Leave sheet= empty (default) for all other queries — this searches ALL sheets "
-            "and returns the best semantic match regardless of which table it comes from. "
-            "Valid sheet values: 'Known Issues', 'Dos and Donts', 'Prerequisites', 'Past Learnings'. "
-            "Examples: "
-            "rag_search(query='CrashLoopBackOff cdp-cadence') — no sheet, searches everything "
-            "rag_search(query='OOMKilled sense-db') — no sheet, searches everything "
-            "rag_search(query='longhorn storage issues') — no sheet, searches everything "
-            "rag_search(query='what are the dos and donts', sheet='Dos and Donts') — user asked explicitly "
-            "rag_search(query='prerequisites before deploy', sheet='Prerequisites') — user asked explicitly "
-            "rag_search(query='vault incident 2024', sheet='Past Learnings') — user asked explicitly "
-            "IMPORTANT: if the result starts with KB_EMPTY: the knowledge base has not been ingested yet. "
-            "In that case relay the message as-is — do NOT answer from training data."
-        ),
-        "parameters": {
-            "query":    {"type": "string",
-                         "description": "Search query — use specific error names, component names, or symptoms."},
-            "top_k":    {"type": "integer", "default": 10},
-            "doc_type": {"type": "string",  "default": None},
-            "sheet":    {"type": "string",  "default": None,
-                         "description": (
-                             "Optional sheet filter. Valid values: "
-                             "'Known Issues', 'Dos and Donts', 'Prerequisites', 'Past Learnings'. "
-                             "Use when the user explicitly asks for a specific category."
-                         )},
-        },
-    },
-}
+from rag.db import init_db
+from rag.search import RAG_TOOLS, rag_retrieve, get_doc_stats
+from rag.ingest import ingest_directory, ingest_file, ingest_excel
 
 _PROMPT_FILE = _HERE / "config" / "system_prompt.txt"
 
@@ -1040,15 +371,8 @@ def build_agent():
             if (_needs_ns and not _ns_specified) else ""
         )
 
-        # ── Tool-driven synthesis router ─────────────────────────────────────
-        # Format is determined by which tool(s) produced the results —
-        # NOT by parsing the question text.  This eliminates keyword
-        # fragility: new question phrasings never break the output format.
-
-        # Build a set of tool names that produced results this turn
         _tools_used = {getattr(tr, "name", "") for tr in tool_results}
 
-        # Assemble all tool output into a single string for the synthesis prompt
         _tool_char_limit = 40000
         parts = []
         for i, tr in enumerate(tool_results, 1):
@@ -1056,19 +380,13 @@ def build_agent():
             parts.append(f"--- TOOL RESULT {i} ---\n{body}\n")
         combined = "".join(parts)
 
-        # ── Per-tool format definitions ───────────────────────────────────────
-        # Each tool knows what shape its output takes and what format
-        # best serves the user.
-
         _TOOL_FORMATS = {
-            # Raw log output — always verbatim, timestamps intact, no prose
             "get_pod_logs": (
                 "Reproduce the log output EXACTLY as returned by the tool. "
                 "Include every log line with its full timestamp. "
                 "Do NOT summarise, paraphrase, or describe the log content in prose. "
                 "If the tool returned an error, state it exactly."
             ),
-            # Detailed per-pod diagnosis — structured bullet per pod
             "get_unhealthy_pods_detail": (
                 "List EVERY pod from the tool results. "
                 "One bullet per pod. Format: "
@@ -1076,73 +394,57 @@ def build_agent():
                 "(use exit code, OOMKilled, liveness probe failure, StartError, or last log lines). "
                 "Do NOT write prose. Do NOT skip any pod."
             ),
-            # PVC status — enumerate non-Bound PVCs
             "get_pvc_status": (
                 "List every non-Bound PVC from the results. "
                 "Format per PVC: namespace/name, phase, storage class, capacity. "
                 "If all PVCs are Bound, say so explicitly. "
                 "Do NOT include Bound PVCs unless the user asked for all PVCs."
             ),
-            # PV disk usage — reproduce the structured report in full
             "get_pv_usage": (
                 "Reproduce the storage usage report in full — do NOT summarise. "
                 "Include every PVC entry: those nearing capacity, within capacity, AND skipped. "
                 "For skipped entries show the exact reason from the tool output."
             ),
-            # CoreDNS — structured health report
             "get_coredns_health": (
                 "Report CoreDNS health from the tool results. "
                 "State each pod's phase and readiness. "
                 "Include DNS resolution test results exactly as shown. "
                 "Use bullet points, one per pod/test."
             ),
-            # Pod describe — structured container detail
             "describe_pod": (
                 "Report the pod details from the tool results. "
                 "Include: phase, conditions, each container's state and restart count, "
                 "resource requests and limits. Use the exact values from the tool output."
             ),
-            # Prometheus metrics — reproduce the chart data summary
             "query_prometheus_metrics": (
                 "Present the metrics exactly as returned. "
                 "List each series with its last value. Do not round or omit any series."
             ),
-            # Image versions — one bullet per pod with image tag
             "get_pod_images": (
                 "List every pod from the results. "
                 "Format: `namespace/pod-name` [container]: registry/image:tag. "
                 "Do NOT show health fields (phase/restarts/cause) — image and tag only."
             ),
-            # Node resource requests — reproduce the per-node table
             "get_node_resource_requests": (
                 "Reproduce the node resource table exactly. "
                 "Include every node with its CPU and memory figures."
             ),
-            # kubectl output — verbatim
             "kubectl_exec": (
                 "Reproduce the command output VERBATIM. "
                 "Do NOT reformat, summarise, or omit any rows."
             ),
-            # Pod status table — reproduce verbatim when raw output was requested
             "get_pod_status": (
                 "Reproduce the pod table VERBATIM — every row, every column. "
                 "Do NOT summarise, count, or describe in prose. "
                 "If the result is a single summary sentence (e.g. 'All pods healthy'), "
                 "reproduce it exactly."
             ),
-            # Namespace resource summary — always show TOTAL first, then per-pod
             "get_namespace_resource_summary": (
                 "ALWAYS lead with the total figures at the top of the answer: "
                 "total CPU requested, total CPU limit, total memory requested, total memory limit. "
                 "Then list the per-pod breakdown. "
                 "Do NOT start by listing individual pods — the total is the answer to a calculate question."
             ),
-            # Node resource requests — reproduce the per-node table
-            "get_node_resource_requests": (
-                "Reproduce the node resource table exactly. "
-                "Include every node with its CPU and memory figures."
-            ),
-            # Node health — preserve exact GPU and resource figures
             "get_node_health": (
                 "Report the node health from the tool results. "
                 "For each node state: name, Ready status, any pressure conditions. "
@@ -1150,7 +452,6 @@ def build_agent():
                 "e.g. 'GPU:2/2 (all in use — none free)' or 'GPU:0/2 (none in use — all free)'. "
                 "Do NOT paraphrase GPU status — copy the exact numbers and state label."
             ),
-            # GPU info — exact model, count, and in-use/free status
             "get_gpu_info": (
                 "Report GPU details from the tool results. "
                 "State the exact GPU model, total allocatable count, and how many are in use vs free. "
@@ -1159,7 +460,6 @@ def build_agent():
             ),
         }
 
-        # ── Multi-tool health sweep (3+ tools from broad health check) ────────
         _HEALTH_SWEEP_TOOLS = {
             "get_node_health", "get_pod_status", "get_deployment_status",
             "get_pvc_status", "get_events", "get_daemonset_status",
@@ -1170,17 +470,12 @@ def build_agent():
             and _tools_used.issubset(_HEALTH_SWEEP_TOOLS | {""})
         )
 
-        # ── Enumeration tools (always list-per-item) ──────────────────────────
         _ENUMERATION_TOOLS = {
             "get_pod_status", "get_deployment_status", "get_daemonset_status",
             "get_statefulset_status", "get_job_status", "get_hpa_status",
             "get_service_status", "get_namespace_status",
         }
 
-        # ── Select synthesis prompt ───────────────────────────────────────────
-        # Priority: specific tool format > health sweep > enumeration > general
-
-        # 1. Single specific tool with its own format
         _single_tool = next(iter(_tools_used - {""}), None)
         if len(_tools_used - {""}) == 1 and _single_tool in _TOOL_FORMATS:
             synthesis_prompt = (
@@ -1189,7 +484,6 @@ def build_agent():
                 + _TOOL_FORMATS[_single_tool]
             )
 
-        # 2. Broad health sweep → concise summary
         elif _is_health_sweep:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
@@ -1202,7 +496,6 @@ def build_agent():
                 "Use plain sentences. No markdown headers. No closing remarks."
             )
 
-        # 3. Enumeration tools (single tool, list output) → per-item bullets
         elif _single_tool in _ENUMERATION_TOOLS:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
@@ -1214,7 +507,6 @@ def build_agent():
                 "reproduce it exactly without expansion."
             )
 
-        # 4. General / mixed tools → natural answer grounded in results
         else:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
@@ -1501,7 +793,6 @@ def build_agent():
             results.append(ToolMessage(content=out, tool_call_id=tc["id"], name=name))
 
             _req_id = state.get("req_id", "")
-            # KB_EMPTY sentinel: rag_search found nothing ingested → ingest reminder
             if name == "rag_search" and isinstance(out, str) and out.startswith("KB_EMPTY:"):
                 _log_ag.info(f"[REQ:{_req_id}] [tool_node] KB empty — returning ingest prompt directly")
                 updates.append("⚠️ Knowledge base is empty")
@@ -1533,7 +824,6 @@ def build_agent():
         if not tcs:
             return "end"
 
-        # Hard stop: never call the same tool with identical args twice
         already = state.get("tool_calls_made", [])
         pending = [tc["name"] for tc in tcs]
         if already and all(name in already for name in pending):
@@ -2350,36 +1640,22 @@ _MSG_NO_INGEST = (
 )
 
 _KB_TOPIC_KEYWORDS = [
-    # ECS / platform
     "longhorn", "ecs", "cdp", "cloudera", "rancher", "vault", "prometheus",
     "grafana", "cert-manager", "coredns", "ingress", "pvc", "pv", "storageclass",
-    # question types
     "known issue", "known problem", "list issue", "unresolved", "open issue",
     "dos and don", "best practice", "prerequisite", "prereq",
     "past learning", "postmortem", "incident", "what went wrong",
     "runbook", "playbook", "troubleshoot", "fix", "remediation",
-    # k8s errors
     "crashloop", "oomkill", "imagepull", "pending", "evicted",
     "not running", "not ready", "node pressure",
-    # versions
     "1.5", "1.6", "sp1", "sp2", "upgrade",
 ]
 
 def _is_kb_topic(question: str) -> bool:
-    """Return True if the question is clearly about ECS/KB topics."""
     ql = question.lower()
     return any(k in ql for k in _KB_TOPIC_KEYWORDS)
 
-
 def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: int = 0) -> str:
-    # Hard guard: if context is empty/None and the question is about a KB topic,
-    # return the ingest reminder immediately — never pass to the LLM.
-    # Local LLMs reliably ignore system-prompt-only instructions when context is absent,
-    # so this must be enforced in code, not just in the prompt.
-    # Distinguish three distinct "no context" situations:
-    #  1. KB is empty (KB_EMPTY sentinel)  → ingest reminder
-    #  2. KB has content but no match found → "nothing found for that query"
-    #  3. Vague / gibberish input           → "didn't understand" regardless of KB state
     _kb_is_empty  = not context or not context.strip() or (
         isinstance(context, str) and context.startswith("KB_EMPTY:")
     )
@@ -2389,10 +1665,7 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
     )
     _no_context   = _kb_is_empty or _no_match
 
-    # Vague / gibberish detector — check this FIRST, before KB state checks,
-    # because we always want "didn't understand" regardless of whether the KB
-    # is empty or full.
-    _VAGUE_THRESHOLD = 6   # questions shorter than this (stripped) are likely vague
+    _VAGUE_THRESHOLD = 6
     _q_stripped = question.strip()
     _is_vague = (
         len(_q_stripped) < _VAGUE_THRESHOLD
@@ -2415,7 +1688,6 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
         return _MSG_VAGUE
 
     if _no_context:
-        # Identity / greeting — return intro regardless of KB state
         _GREETING_PATTERNS = (
             "what can you do", "what do you do", "what can you help",
             "who are you", "what are you", "tell me about yourself",
@@ -2438,15 +1710,12 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
             )
         if _is_kb_topic(question):
             if _no_match:
-                # KB is ingested but nothing matched this query
                 return (
                     "No results found in the knowledge base for that query. "
                     "Try rephrasing, or ask about: known issues, dos and don'ts, "
                     "prerequisites, or past learnings."
                 )
-            # KB is genuinely empty
             return _MSG_NO_INGEST
-        # Non-KB, non-greeting, non-vague question with no context
         if _no_match:
             return (
                 "No results found for that query. "
@@ -2495,7 +1764,6 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
             + "Answer using only the context above."
         )
     else:
-
         user_msg = "Question: " + question
     msgs = [
         {"role": "system", "content": sys_prompt},
@@ -2506,7 +1774,6 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
 
     try:
         if tok is None:
-
             resp = mdl.create_chat_completion(
                 messages=msgs,
                 max_tokens=_max_out,
@@ -2516,7 +1783,6 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
             )
             raw = resp["choices"][0]["message"].get("content", "") or ""
         else:
-
             import torch
             kw = {"add_generation_prompt": True}
             if is_q3:
@@ -2582,9 +1848,6 @@ async def api_kb_ask(req: KbAskRequest):
         no_rag = not context.strip() or context == "No relevant documentation found." or (isinstance(context, str) and context.startswith("KB_EMPTY:"))
         rag_ctx = None if no_rag else context
 
-        # Hard short-circuit: if the KB is empty and the question is about an ECS/KB topic,
-        # return the "please ingest" message directly — do NOT call the LLM, which would
-        # otherwise fabricate a plausible-sounding but completely invented answer.
         if no_rag and _is_kb_topic(req.q):
             logger.info("[API/kb/ask] no_rag + kb_topic → returning ingest prompt (skipping LLM)")
             return {"answer": _MSG_NO_INGEST, "query": req.q, "top_k": top_k}
@@ -2645,7 +1908,6 @@ async def api_kb_stream(req: KbAskRequest):
                 m = _re.search(r'(\d+) match', context)
                 match_count = int(m.group(1)) if m else "?"
 
-            # Hard short-circuit: empty KB + KB topic → ingest prompt, no LLM call.
             if no_rag and _is_kb_topic(q):
                 logger.info("[api_kb_stream] no_rag + kb_topic → returning ingest prompt (skipping LLM)")
                 elapsed = round(_time.time() - start, 1)
