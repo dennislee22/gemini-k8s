@@ -1040,201 +1040,148 @@ def build_agent():
             if (_needs_ns and not _ns_specified) else ""
         )
 
-        _ANALYSIS_KEYWORDS = (
-            "ok", "okay", "healthy", "health", "doing", "status", "issue",
-            "problem", "error", "fail", "warning", "trouble", "concern",
-            "pressure", "crashing", "restart", "stuck", "degraded",
-            "why", "what", "how", "is there", "are there", "should i",
-            "diagnos", "analys", "check if", "verify", "confirm",
-        )
-        _LIST_KEYWORDS = (
-            "list all", "list every", "show all", "show me all", "display all",
-            "all pods", "all namespaces", "all nodes", "all pv", "all ingress",
-            "all pvcs", "all services", "all deployments", "all daemonsets",
-            "all jobs", "all events",
-            "pods in", "output of", "show pods", "show namespaces",
-            "get pods", "get namespaces", "get nodes",
-            "list pods", "list nodes", "list pvc", "list services",
-        )
-        _COMPARISON_KEYWORDS = (
-            "most", "least", "fewest", "highest", "lowest",
-            "which namespace has more", "which node has more",
-            "which node uses", "which namespace uses",
-            "rank", "top", "bottom", "compare",
-            "most pods", "least pods",
-        )
-        _ENUMERATION_PROBLEM_KEYWORDS = (
-            "which pods", "what pods", "pods have", "pods are", "pods with",
-            "pods that", "pods not", "pods failing", "pods having",
-            "any pods", "any pod", "pods problem", "problem pods",
-            "unhealthy pods", "failing pods", "broken pods", "bad pods",
-            "crashloopbackoff", "not running", "not ready", "not starting",
-            "problem to start", "fail to start", "failed to start",
-            "cannot start", "not starting", "unable to start",
-            # PVC state enumeration
-            "which pvc", "what pvc", "any pvc", "pvcs not", "pvc not",
-            "not bound", "unbound", "pvc stuck", "pvc pending", "pvc lost",
-            "which persistent", "any persistent",
-            # Restart threshold enumeration
-            "restarted more than", "more than", "restarted over",
-            "restart more than", "restarts more than", "times in",
-            "pods with more", "pods restarted",
-        )
-        _oq = original_question.lower()
-        is_list_query = (
-            any(k in _oq for k in _LIST_KEYWORDS)
-            and not any(k in _oq for k in _ANALYSIS_KEYWORDS)
-        )
-        is_comparison_query = any(k in _oq for k in _COMPARISON_KEYWORDS)
-        is_enumeration_query = any(k in _oq for k in _ENUMERATION_PROBLEM_KEYWORDS)
+        # ── Tool-driven synthesis router ─────────────────────────────────────
+        # Format is determined by which tool(s) produced the results —
+        # NOT by parsing the question text.  This eliminates keyword
+        # fragility: new question phrasings never break the output format.
 
-        parts = []
-        _tool_char_limit = 40000
-        for i, tr in enumerate(tool_results, 1):
-            body = tr.content if len(tr.content) <= _tool_char_limit else tr.content[:_tool_char_limit] + "\n...[truncated]"
-            parts.append(f"--- TOOL RESULT {i} ---\n{body}\n")
-        combined = "".join(parts)
+        # Build a set of tool names that produced results this turn
+        _tools_used = {getattr(tr, "name", "") for tr in tool_results}
 
-        _PV_USAGE_KEYWORDS = (
-            "nearing capacity", "nearing their", "storage capacity", "storage usage",
-            "pv usage", "pvc usage", "pv full", "pvc full", "disk usage",
-            "almost full", "running out", "how full", "above 80", "above 90",
-            "which pv", "which pvs", "which pvc", "which pvcs",
-        )
-        is_pv_usage = (
-            any(k in _oq for k in _PV_USAGE_KEYWORDS)
-            or any(getattr(tr, "name", "") == "get_pv_usage" for tr in tool_results)
+        # ── Per-tool format definitions ───────────────────────────────────────
+        # Each tool knows what shape its output takes and what format
+        # best serves the user.
+
+        _TOOL_FORMATS = {
+            # Raw log output — always verbatim, timestamps intact, no prose
+            "get_pod_logs": (
+                "Reproduce the log output EXACTLY as returned by the tool. "
+                "Include every log line with its full timestamp. "
+                "Do NOT summarise, paraphrase, or describe the log content in prose. "
+                "If the tool returned an error, state it exactly."
+            ),
+            # Detailed per-pod diagnosis — structured bullet per pod
+            "get_unhealthy_pods_detail": (
+                "List EVERY pod from the tool results. "
+                "One bullet per pod. Format: "
+                "`namespace/pod-name`: <phase> | Restarts: <N> | Cause: <reason> "
+                "(use exit code, OOMKilled, liveness probe failure, StartError, or last log lines). "
+                "Do NOT write prose. Do NOT skip any pod."
+            ),
+            # PVC status — enumerate non-Bound PVCs
+            "get_pvc_status": (
+                "List every non-Bound PVC from the results. "
+                "Format per PVC: namespace/name, phase, storage class, capacity. "
+                "If all PVCs are Bound, say so explicitly. "
+                "Do NOT include Bound PVCs unless the user asked for all PVCs."
+            ),
+            # PV disk usage — reproduce the structured report in full
+            "get_pv_usage": (
+                "Reproduce the storage usage report in full — do NOT summarise. "
+                "Include every PVC entry: those nearing capacity, within capacity, AND skipped. "
+                "For skipped entries show the exact reason from the tool output."
+            ),
+            # CoreDNS — structured health report
+            "get_coredns_health": (
+                "Report CoreDNS health from the tool results. "
+                "State each pod's phase and readiness. "
+                "Include DNS resolution test results exactly as shown. "
+                "Use bullet points, one per pod/test."
+            ),
+            # Pod describe — structured container detail
+            "describe_pod": (
+                "Report the pod details from the tool results. "
+                "Include: phase, conditions, each container's state and restart count, "
+                "resource requests and limits. Use the exact values from the tool output."
+            ),
+            # Prometheus metrics — reproduce the chart data summary
+            "query_prometheus_metrics": (
+                "Present the metrics exactly as returned. "
+                "List each series with its last value. Do not round or omit any series."
+            ),
+            # Image versions — one bullet per pod with image tag
+            "get_pod_images": (
+                "List every pod from the results. "
+                "Format: `namespace/pod-name` [container]: registry/image:tag. "
+                "Do NOT show health fields (phase/restarts/cause) — image and tag only."
+            ),
+            # Node resource requests — reproduce the per-node table
+            "get_node_resource_requests": (
+                "Reproduce the node resource table exactly. "
+                "Include every node with its CPU and memory figures."
+            ),
+            # kubectl output — verbatim
+            "kubectl_exec": (
+                "Reproduce the command output VERBATIM. "
+                "Do NOT reformat, summarise, or omit any rows."
+            ),
+        }
+
+        # ── Multi-tool health sweep (3+ tools from broad health check) ────────
+        _HEALTH_SWEEP_TOOLS = {
+            "get_node_health", "get_pod_status", "get_deployment_status",
+            "get_pvc_status", "get_events", "get_daemonset_status",
+            "get_statefulset_status", "get_job_status", "get_hpa_status",
+        }
+        _is_health_sweep = (
+            len(tool_results) >= 3
+            and _tools_used.issubset(_HEALTH_SWEEP_TOOLS | {""})
         )
 
-        _DNS_HEALTH_KEYWORDS = (
-            "is coredns", "is the coredns", "coredns running", "coredns ok", "coredns health",
-            "is dns", "is the dns", "dns running", "dns ok", "dns health",
-            "dns resolution", "nslookup",
-        )
-        _COMPONENT_HEALTH_KEYWORDS = (
-            "is vault", "is the vault", "vault running", "vault ok",
-            "is longhorn", "longhorn running", "longhorn ok",
-            "is prometheus", "prometheus running", "prometheus ok",
-            "is grafana", "grafana running", "grafana ok",
-            "is certmanager", "cert-manager running",
-            "running properly", "running ok", "running correctly",
-            "doing ok", "doing fine", "doing well", "doing good",
-        )
-        is_dns_health = any(k in _oq for k in _DNS_HEALTH_KEYWORDS)
-        is_component_health = any(k in _oq for k in _COMPONENT_HEALTH_KEYWORDS)
+        # ── Enumeration tools (always list-per-item) ──────────────────────────
+        _ENUMERATION_TOOLS = {
+            "get_pod_status", "get_deployment_status", "get_daemonset_status",
+            "get_statefulset_status", "get_job_status", "get_hpa_status",
+            "get_service_status", "get_namespace_status",
+        }
 
-        is_health_summary = len(tool_results) >= 3 and not is_list_query and not is_enumeration_query
+        # ── Select synthesis prompt ───────────────────────────────────────────
+        # Priority: specific tool format > health sweep > enumeration > general
 
-        _PVC_STATE_KEYWORDS = (
-            "which pvc", "what pvc", "any pvc", "pvcs not", "pvc not",
-            "not bound", "unbound", "pvc stuck", "pvc pending", "pvc lost",
-            "which persistent", "any persistent",
-        )
-        is_pvc_state_query = any(k in _oq for k in _PVC_STATE_KEYWORDS)
-
-        if is_pvc_state_query:
+        # 1. Single specific tool with its own format
+        _single_tool = next(iter(_tools_used - {""}), None)
+        if len(_tools_used - {""}) == 1 and _single_tool in _TOOL_FORMATS:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
-                "List EVERY non-Bound PVC from the tool results above. "
-                "Include: namespace/pvc-name, phase (Pending/Lost/etc), storage class, and capacity. "
-                "If no non-Bound PVCs exist, say so explicitly. "
-                "Do NOT include Bound PVCs. Do NOT summarise — list each one individually."
+                + _TOOL_FORMATS[_single_tool]
             )
-        elif is_health_summary:
+
+        # 2. Broad health sweep → concise summary
+        elif _is_health_sweep:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
                 "Write a concise cluster health summary:\n"
                 "1. Overall status in one sentence (healthy / issues found).\n"
-                "2. If any problems exist, list them specifically: name the exact pod, node, deployment, PVC, or event with the issue and its state.\n"
+                "2. If any problems exist, list them specifically: exact pod, node, "
+                "deployment, PVC, or event with its state.\n"
                 "3. If everything is healthy, say so briefly — do not list healthy items.\n"
                 "Use plain sentences. No markdown headers. No closing remarks."
             )
-        elif is_pv_usage:
-            synthesis_prompt = (
-                "RULES:\n"
-                "1. Reproduce the tool output in full — do NOT summarise or compress any section.\n"
-                "2. Include every PVC entry: those nearing capacity, those within capacity, AND those skipped.\n"
-                "3. For skipped entries, show the exact reason from the tool output (e.g. actualSize=0, CRD missing, no running pod).\n"
-                "4. Do NOT replace skipped details with vague phrases like 'encountered issues' or 'no mounted pod'.\n"
-                "5. Answer ONLY from the tool results — do not invent any PVC names or usage figures.\n"
-                "\n"
-                f"Question: {original_question}\n\n"
-                f"Tool Results:\n{combined}\n"
-                "Present the full storage usage report exactly as structured in the tool results above."
-            )
-        elif is_dns_health:
+
+        # 3. Enumeration tools (single tool, list output) → per-item bullets
+        elif _single_tool in _ENUMERATION_TOOLS:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
-                "Answer in bullet point form. Cover:\n"
-                "• Overall verdict (running properly / has issues) in the first bullet.\n"
-                "• One bullet per pod: name, phase, ready status, restart count.\n"
-                "• One bullet for the DNS service ClusterIP and ports (if present in results).\n"
-                "• One bullet per DNS resolution test result: hostname, resolved IP (or error).\n"
-                "• Final bullet: overall DNS resolution verdict (✅ working / ❌ failing).\n"
-                "Skip any section if the tool results don't contain that data. "
-                "No prose paragraphs. No preamble. No closing remarks."
+                "List EVERY item from the tool results. "
+                "One bullet per item. Include namespace, name, and relevant state. "
+                "Do NOT skip or summarise any item. "
+                "If the result is a summary line (e.g. 'All pods healthy'), "
+                "reproduce it exactly without expansion."
             )
-        elif is_component_health:
-            synthesis_prompt = (
-                "RULES:\n"
-                "1. Answer ONLY from the tool results below. Do NOT invent any pod names, "
-                "deployment names, PVC names, or any resource names not explicitly present in the results.\n"
-                "2. If a tool result is a single summary sentence (e.g. 'All pods are healthy and Running'), "
-                "copy that sentence exactly — do NOT expand it, do NOT add pod names.\n"
-                "3. If a tool result contains no data or is empty, skip it — do not mention it.\n"
-                "4. Your answer must include ALL details from the tool results — do not omit or summarise any pod, PVC, or event data.\n"
-                "5. No DNS content unless the question explicitly asks about DNS.\n"
-                "\n"
-                f"Question: {original_question}\n\n"
-                f"Tool Results:\n{combined}\n"
-                "Answer in bullet points. First bullet: overall verdict. "
-                "Subsequent bullets: only facts explicitly stated in the tool results above."
-            )
-        elif is_enumeration_query:
-            synthesis_prompt = (
-                f"Question: {original_question}\n\n"
-                f"Tool Results:\n{combined}\n"
-                "List EVERY pod that appears in the tool results above. "
-                "Do NOT skip, summarise, or omit any pod — include all of them. "
-                "Do NOT write prose sentences — use one bullet per pod. "
-                "For each pod use this exact format:\n"
-                "  - `namespace/pod-name`: <phase> | Restarts: <N> | Cause: <reason>\n"
-                "Determine the cause from: exit code, OOMKilled, liveness probe failure, "
-                "CrashLoopBackOff reason, StartError, or the last log lines if present. "
-                "If the reason is not in the tool output, write Cause: unknown. "
-                "Note: restart counts are totals since pod creation, not a 24h window. "
-                "If no matching pods are found, say so explicitly. "
-                "No preamble. No closing remarks."
-            )
-        elif is_list_query and not is_comparison_query:
-            synthesis_prompt = (
-                f"Question: {original_question}\n\n"
-                f"Tool Results:\n{combined}\n"
-                "Reproduce the tool results VERBATIM. "
-                "Do NOT summarise, count, or omit any items. "
-                "If the output ends mid-list due to truncation, state the total count from the header line and note the list was truncated."
-            )
-        elif is_comparison_query:
-            synthesis_prompt = (
-                f"Question: {original_question}\n\n"
-                f"Tool Results:\n{combined}\n"
-                "Write a natural, conversational answer to the question. "
-                "Use complete sentences. Reference the specific resource name and relevant numbers. "
-                "Example: 'Node ecs-w-03 has 2 GPUs allocatable with 0 currently in use, so both are available.' "
-                "Do NOT dump a list. Two sentences maximum."
-            )
+
+        # 4. General / mixed tools → natural answer grounded in results
         else:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
-                "Write a natural, conversational answer using only the tool results above. "
-                "Use complete sentences. Be specific — name exact pods, nodes, or resources. "
-                "No preamble. No closing remarks. "
-                "If the results contain a list of items, reproduce it in full. "
-                "If the question asks for a count and the tool output contains a total (e.g. '43 total'), state that number directly."
+                "Answer the question using only the tool results above. "
+                "Be specific — name exact pods, nodes, or resources. "
+                "If the results contain a list, reproduce it in full. "
+                "If the question asks for a count, state the number directly. "
+                "No preamble. No closing remarks."
             )
 
         return [HumanMessage(content=_ns_prefix + synthesis_prompt)]
