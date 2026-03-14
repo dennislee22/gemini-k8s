@@ -295,14 +295,35 @@ def get_pod_status(namespace: str = "all", show_all: bool = False, raw_output: b
         return f"K8s API error: {e.reason}"
 
 def get_pod_logs(pod_name: str, namespace: str = "default",
-                 tail_lines: int = 50) -> str:
+                 tail_lines: int = 50, container: str = "") -> str:
     tail_lines = min(tail_lines, 100)
     try:
+        # For multi-container pods the K8s API returns 400 Bad Request unless
+        # a container name is specified.  Auto-detect the main app container
+        # if the caller did not supply one.
+        kw: dict = {"tail_lines": tail_lines, "timestamps": True}
+        if container:
+            kw["container"] = container
+        else:
+            try:
+                pod = _core.read_namespaced_pod(name=pod_name, namespace=namespace)
+                containers = [c.name for c in (pod.spec.containers or [])]
+                if len(containers) > 1:
+                    # Prefer a container whose name matches the pod name stem,
+                    # otherwise fall back to the last container (usually the app).
+                    pod_stem = pod_name.rsplit("-", 2)[0] if pod_name.count("-") >= 2 else pod_name
+                    preferred = next(
+                        (c for c in containers if pod_stem in c or c in pod_stem),
+                        containers[-1]
+                    )
+                    kw["container"] = preferred
+            except ApiException:
+                pass  # let the log call fail naturally with a clear error
         logs = _core.read_namespaced_pod_log(
-            name=pod_name, namespace=namespace,
-            tail_lines=tail_lines, timestamps=True)
-        return (f"Last {tail_lines} lines of '{pod_name}':\n{logs}"
-                if logs.strip() else f"No logs for '{pod_name}'.")
+            name=pod_name, namespace=namespace, **kw)
+        container_label = (f" [{kw['container']}]" if "container" in kw else "")
+        return (f"Last {tail_lines} lines of '{pod_name}'{container_label}:\n{logs}"
+                if logs.strip() else f"No logs for '{pod_name}'{container_label}.")
     except ApiException as e:
         return (f"Pod '{pod_name}' not found."
                 if e.status == 404 else f"K8s error: {e.reason}")
@@ -3589,12 +3610,23 @@ K8S_TOOLS: dict = {
     },
     "get_pod_logs": {
         "fn":          get_pod_logs,
-        "description": "Fetch recent logs from a specific pod. For multi-container pods, specify container_name.",
+        "description": (
+            "Fetch recent log lines from a specific pod. "
+            "Use for: 'show me the log of pod X', 'get logs for X', 'what does pod X log say?'. "
+            "For multi-container pods the correct container is auto-selected — "
+            "only pass container= if the user asks for a specific container's logs. "
+            "ALWAYS pass the namespace explicitly — never leave it as 'default' "
+            "when the pod is in a named namespace."
+        ),
         "parameters":  {
-            "pod_name":       {"type": "string"},
-            "namespace":      {"type": "string",  "default": "default", "description": "Namespace to query. Defaults to 'default' — only override when the user explicitly names a namespace."},
-            "tail_lines":     {"type": "integer", "default": 50,
-                               "description": "Number of log lines to return (max 100)"},
+            "pod_name":   {"type": "string",
+                           "description": "Exact pod name (e.g. 'cdp-release-prometheus-server-86844db8-v8lkg')."},
+            "namespace":  {"type": "string",  "default": "default",
+                           "description": "Namespace the pod lives in. Extract from context — never assume 'default'."},
+            "tail_lines": {"type": "integer", "default": 50,
+                           "description": "Number of log lines to return (max 100)."},
+            "container":  {"type": "string",  "default": "",
+                           "description": "Container name. Leave empty to auto-select the main app container."},
         },
     },
     "describe_pod": {

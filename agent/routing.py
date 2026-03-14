@@ -3,12 +3,11 @@ import logging
 
 _log = logging.getLogger("agent.routing")
 
-NS_ALIASES = {
-    "vault":      "vault-system",
-    "longhorn":   "longhorn-system",
-    "cattle":     "cattle-system",
-    "rancher":    "cattle-system",
-    "cert":       "cert-manager",
+# ── Namespace alias registry ──────────────────────────────────────────────────
+# _K8S_NS_ALIASES: Kubernetes-standard component namespaces mandated by the
+# Kubernetes spec — safe to hardcode since they never change regardless of how
+# the cluster is deployed.
+_K8S_NS_ALIASES = {
     "coredns":    "kube-system",
     "core-dns":   "kube-system",
     "dns":        "kube-system",
@@ -20,10 +19,42 @@ NS_ALIASES = {
     "controller": "kube-system",
     "apiserver":  "kube-system",
     "api-server": "kube-system",
-    "cdp":         "cdp",
-    "prometheus": "monitoring",
-    "alertmanager": "monitoring",
 }
+
+# _TOPOLOGY_NS_ALIASES: deployment-specific namespace mappings that vary per
+# customer, ECS version, and Helm values.  These are NOT hardcoded — they are
+# loaded from the NS_ALIASES environment variable so each deployment can
+# configure its own topology without touching code.
+#
+# Set NS_ALIASES in your .env file:
+#   NS_ALIASES="vault=vault-system,longhorn=longhorn-system,alertmanager=monitoring,cdp=cdp"
+#
+# The defaults below match the reference ECS deployment; override with env var.
+import os as _os
+
+def _load_topology_aliases() -> dict:
+    raw = _os.getenv("NS_ALIASES", "").strip()
+    if raw:
+        result = {}
+        for pair in raw.split(","):
+            pair = pair.strip()
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                result[k.strip().lower()] = v.strip()
+        if result:
+            return result
+    # Default fallback — should be overridden via NS_ALIASES env var
+    return {
+        "vault":    "vault-system",
+        "longhorn": "longhorn-system",
+        "cdp":      "cdp",
+    }
+
+_TOPOLOGY_NS_ALIASES = _load_topology_aliases()
+
+# Merged alias map — K8s-standard aliases always win over topology overrides
+NS_ALIASES = {**_TOPOLOGY_NS_ALIASES, **_K8S_NS_ALIASES}
+
 
 
 def resolve_namespace(lm: str, req_id: str = "") -> str:
@@ -31,11 +62,12 @@ def resolve_namespace(lm: str, req_id: str = "") -> str:
     m = re.search(r'(?:^|\s)(?:in|for|namespace|ns)\s+([a-z0-9-]+)', lm)
     if m:
         raw = m.group(1)
-        # Exclude PVC/pod state words that appear after "in" but are not namespace names
+        # Exclude PVC/pod state words and pod-name-shaped tokens
+        # (pod names have 3+ hyphens e.g. "cdp-release-svc-abc-123" — never a namespace)
         _STATE_WORDS = {"all", "namespace", "ns", "the", "this",
                         "pending", "lost", "bound", "unbound", "stuck",
                         "running", "failed", "unknown", "error", "ready"}
-        if raw not in _STATE_WORDS:
+        if raw not in _STATE_WORDS and raw.count("-") < 3:
             resolved = NS_ALIASES.get(raw, raw)
             _log.debug(f"{tag}[routing] namespace resolved: {raw!r} → {resolved!r} (explicit pattern)")
             return resolved
@@ -149,6 +181,44 @@ def default_tools_for(user_msg: str, req_id: str = "") -> list:
     if _is_pvc_state:
         _log.info(f"{tag}[routing] FALLBACK → get_pvc_status(namespace={ns!r}) (PVC state query)")
         return [("get_pvc_status", {"namespace": ns, "detail": True})]
+
+    # Pod log query: "show me the log of pod X", "logs for X", "get pod logs"
+    # Pod-name pattern: lowercase letters/digits/hyphens with at least 2 hyphens
+    import re as _re2
+    _has_pod_name = bool(_re2.search(
+        r'[a-z][a-z0-9-]+-[a-z0-9]+-[a-z0-9]+', lm))
+    _is_pod_log = (
+        any(k in lm for k in ["log of ", "log for ", "logs of ", "logs for ",
+                               "show log", "show me log", "get log", "get logs",
+                               "pod log", "container log", " logs "])
+        and (any(k in lm for k in ["pod", "container"]) or _has_pod_name)
+    )
+    if _is_pod_log:
+        # Extract pod name: longest hyphenated token that looks like a pod name
+        import re as _re
+        pod_match = _re.search(
+            r'[a-z][a-z0-9-]*-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*', lm)
+        pod_name = pod_match.group(0) if pod_match else ""
+        _log.info(f"{tag}[routing] FALLBACK → get_pod_logs(pod={pod_name!r}, ns={ns!r})")
+        if pod_name:
+            return [("get_pod_logs", {"pod_name": pod_name, "namespace": ns})]
+        return [("get_pod_logs", {"pod_name": "", "namespace": ns})]
+
+    # Pod describe query: "describe pod X", "show pod description of X"
+    _is_pod_describe = (
+        any(k in lm for k in ["describe pod", "pod description", "description of pod",
+                               "describe the pod", "show description", "pod detail",
+                               "detail of pod", "details of pod", "details for pod"])
+    )
+    if _is_pod_describe:
+        import re as _re
+        pod_match = _re.search(
+            r'[a-z][a-z0-9-]*-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*', lm)
+        pod_name = pod_match.group(0) if pod_match else ""
+        _log.info(f"{tag}[routing] FALLBACK → describe_pod(pod={pod_name!r}, ns={ns!r})")
+        if pod_name:
+            return [("describe_pod", {"pod_name": pod_name, "namespace": ns})]
+        return [("describe_pod", {"pod_name": "", "namespace": ns})]
 
     _is_pod_health = any(k in lm for k in [
         "pod", "pods", "container", "crashloop", "oomkill", "crashing",
