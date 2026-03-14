@@ -341,6 +341,157 @@ def ingest_file(file_path: str, force: bool = False) -> dict:
     docs_tbl.add(rows)
     return {"file": path.name, "status": "ingested", "chunks": len(chunks), "doc_type": doc_type}
 
+
+# ── Schema-agnostic column resolver ─────────────────────────────────────────
+# Maps logical field roles to ordered keyword hints matched against actual
+# column header text (case-insensitive, substring match).
+# First matching column wins.  Multiple hints = multiple fallback names.
+
+_SHEET_ROLES = {
+    "Known Issues": {
+        "symptom":    ["symptom", "observable", "error message", "what breaks",
+                       "description", "what happens"],
+        "problem":    ["problem", "summary", "title", "issue name",
+                       "incident summary", "description"],
+        "root_cause": ["root cause", "cause", "reason", "why", "root"],
+        "fix":        ["remediation", "fix", "resolution", "solution",
+                       "how to fix", "steps", "corrective"],
+        "issue_id":   ["issue id", "id", "ticket", "issue #", "#"],
+        "category":   ["category", "type", "component", "area"],
+        "severity":   ["severity", "priority", "impact", "level"],
+        "present":    ["present", "unresolved", "open", "active", "status"],
+        "jira":       ["jira", "ticket", "postmortem", "link", "url"],
+        "discovered": ["discovered", "found", "created", "reported", "date",
+                       "incident date"],
+        "resolved":   ["resolved", "closed", "fixed date"],
+        "notes":      ["notes", "lessons", "comments", "additional",
+                       "remarks", "observation"],
+    },
+    "Dos and Donts": {
+        "do_text":    ["do", "should", "recommended", "best practice",
+                       "correct", "✅", "yes", "good"],
+        "dont_text":  ["don", "avoid", "never", "not", "incorrect",
+                       "wrong", "❌", "bad", "prohibited"],
+        "rationale":  ["rationale", "reason", "why", "explanation",
+                       "impact", "because"],
+        "category":   ["category", "type", "area", "component"],
+        "jira":       ["jira", "related", "ticket", "issue", "link"],
+    },
+    "Prerequisites": {
+        "prerequisite": ["prerequisite", "requirement", "condition",
+                         "must have", "needed", "dependency", "what"],
+        "rationale":    ["why", "matters", "reason", "rationale",
+                         "impact", "importance", "because"],
+        "how_to_verify": ["verify", "check", "validate", "confirm",
+                          "how to", "test", "proof"],
+        "category":     ["category", "type", "area", "component"],
+    },
+    "Past Learnings": {
+        "problem":    ["incident", "summary", "what happened", "event",
+                       "description", "title", "subject"],
+        "root_cause": ["went wrong", "cause", "reason", "why", "root",
+                       "potential cause", "failure"],
+        "fix":        ["worked well", "resolution", "fix", "solution",
+                       "corrective", "action", "potential resolution",
+                       "key learning", "learning"],
+        "learning":   ["learning", "lesson", "takeaway", "insight",
+                       "key learning", "potential resolution",
+                       "what we learned"],
+        "action_taken": ["action", "taken", "implemented", "change",
+                          "what was done", "resolution", "potential resolution"],
+        "present":    ["prevented", "recurrence", "recur", "status",
+                       "resolved", "fixed"],
+        "jira":       ["jira", "postmortem", "ticket", "link", "url"],
+        "discovered": ["date", "incident date", "when", "discovered",
+                       "occurred"],
+    },
+}
+
+# Columns that are typically row numbers / index columns — skip for search
+_INDEX_HINTS = {"#", "no", "num", "index", "row", "sl no", "s.no"}
+
+def _resolve_col(row: dict, *hints: str, cols: list = None) -> str:
+    """Return first non-empty value from row whose column name (lowercased)
+    contains any of the hint substrings.  cols = actual column list for order."""
+    search_cols = cols or list(row.keys())
+    for hint in hints:
+        hint_l = hint.lower()
+        for col in search_cols:
+            if hint_l in col.lower() and row.get(col, "").strip():
+                return row[col].strip()
+    return ""
+
+def _best_col(row: dict, role_hints: list, cols: list) -> str:
+    """Resolve a single role from ordered hints list."""
+    return _resolve_col(row, *role_hints, cols=cols)
+
+def _all_values(row: dict, cols: list, exclude_roles: set) -> str:
+    """Concatenate all non-empty column values not matched to excluded roles,
+    as a fallback search vector when primary columns are absent."""
+    parts = []
+    for col in cols:
+        col_l = col.lower().strip()
+        # Skip index/number columns
+        if col_l in _INDEX_HINTS or col_l.rstrip(".") in _INDEX_HINTS:
+            continue
+        # Skip columns already included in the primary vector
+        if any(hint in col_l for role in exclude_roles
+               for hint in _SHEET_ROLES.get(role, {}).get("symptom", [])):
+            continue
+        v = str(row.get(col, "")).strip()
+        if v and v.lower() not in ("none", "nan", "n/a", "-", ""):
+            parts.append(v)
+    return " / ".join(parts)
+
+def _warn_unmatched(sn: str, cols: list, matched: set, log_fn):
+    """Log columns that could not be mapped to any known role."""
+    unmatched = [
+        c for c in cols
+        if c not in matched
+        and c.lower().strip() not in _INDEX_HINTS
+        and c.lower().strip().rstrip(".") not in _INDEX_HINTS
+    ]
+    if unmatched:
+        log_fn(f"[RAG/Excel] Sheet '{sn}' — unrecognised columns (stored as-is): {unmatched}")
+
+def _map_row(row: dict, sheet_type: str, cols: list) -> dict:
+    """Map a raw Excel row to the canonical field dict using semantic hints.
+    Falls back to concatenating all values if primary search fields are empty."""
+    roles = _SHEET_ROLES.get(sheet_type, {})
+    resolved = {role: _best_col(row, hints, cols) for role, hints in roles.items()}
+
+    # Build primary search vector from the most semantically rich fields
+    if sheet_type == "Known Issues":
+        primary = resolved.get("symptom", "") or resolved.get("problem", "")
+        # Augment with problem if symptom alone is sparse
+        secondary = resolved.get("problem", "") if primary else ""
+        search_text = " / ".join(t for t in [primary, secondary] if t).strip(" /")
+
+    elif sheet_type == "Dos and Donts":
+        search_text = " / ".join(
+            t for t in [resolved.get("do_text",""), resolved.get("dont_text","")]
+            if t
+        ).strip(" /")
+
+    elif sheet_type == "Prerequisites":
+        search_text = resolved.get("prerequisite", "")
+
+    else:  # Past Learnings
+        search_text = " / ".join(
+            t for t in [
+                resolved.get("problem",""),
+                resolved.get("root_cause",""),
+                resolved.get("fix","") or resolved.get("learning",""),
+            ] if t
+        ).strip(" /")
+
+    # Last resort: if still empty, use all column values
+    if not search_text:
+        search_text = _all_values(row, cols, exclude_roles=set())
+
+    return resolved, search_text
+# ── End schema-agnostic resolver ─────────────────────────────────────────────
+
 def ingest_excel(file_path: str, force: bool = False) -> dict:
     try:
         import pandas as pd
@@ -373,103 +524,75 @@ def ingest_excel(file_path: str, force: bool = False) -> dict:
         sn   = sheet_name.strip()
         df.columns = [c.strip() for c in df.columns]
 
-        if "Known Issues" in sn or "known" in sn.lower():
-            _log_rag.info(f"[RAG/Excel] Sheet '{sn}' → Known Issues ({len(df)} rows)")
-            for _, row in df.iterrows():
-                symptom = _s(row.get("Symptom (Observable)", row.get("Symptom", "")))
-                if not symptom:
-                    continue
-                rows.append({
-                    "id": f"ki-{fhash}-{total}", "vector": embed_text(symptom),
-                    "source_file": path.name, "file_hash": fhash,
-                    "sheet": "Known Issues", "symptom": symptom,
-                    "issue_id":   _s(row.get("Issue ID", "")),
-                    "category":   _s(row.get("Category", "")),
-                    "problem":    _s(row.get("Problem Summary", row.get("Problem", ""))),
-                    "root_cause": _s(row.get("Root Cause", "")),
-                    "fix":        _s(row.get("Remediation Steps", row.get("Fix", ""))),
-                    "severity":   _s(row.get("Severity", "")),
-                    "present":    _s(row.get("Present / Unresolved?", row.get("Present", ""))),
-                    "jira":       _s(row.get("Jira Ticket", row.get("Jira", ""))),
-                    "discovered": _s(row.get("Discovered Date", "")),
-                    "resolved":   _s(row.get("Resolved Date", "")),
-                    "notes":      _s(row.get("Notes / Lessons Learned", row.get("Notes", ""))),
-                    "do_text": "", "dont_text": "", "rationale": "",
-                    "prerequisite": "", "how_to_verify": "", "learning": "", "action_taken": "",
-                })
-                total += 1
-
-        elif "Dos" in sn or "Don" in sn or "donts" in sn.lower():
-            _log_rag.info(f"[RAG/Excel] Sheet '{sn}' → Dos and Don'ts ({len(df)} rows)")
-            for _, row in df.iterrows():
-                do_t   = _s(row.get("✅  DO", row.get("DO", row.get("Do", ""))))
-                dont_t = _s(row.get("❌  DON'T", row.get("DONT", row.get("Don't", ""))))
-                search_text = f"{do_t} / {dont_t}".strip(" /")
-                if not search_text:
-                    continue
-                rows.append({
-                    "id": f"dd-{fhash}-{total}", "vector": embed_text(search_text),
-                    "source_file": path.name, "file_hash": fhash,
-                    "sheet": "Dos and Donts", "symptom": search_text,
-                    "issue_id": "", "category": _s(row.get("Category", "")),
-                    "problem": "", "root_cause": "", "fix": "", "severity": "", "present": "",
-                    "jira": _s(row.get("Related Issue", "")),
-                    "discovered": "", "resolved": "",
-                    "notes": _s(row.get("Rationale", "")),
-                    "do_text": do_t, "dont_text": dont_t,
-                    "rationale": _s(row.get("Rationale", "")),
-                    "prerequisite": "", "how_to_verify": "", "learning": "", "action_taken": "",
-                })
-                total += 1
-
-        elif "Prerequisite" in sn or "prereq" in sn.lower():
-            _log_rag.info(f"[RAG/Excel] Sheet '{sn}' → Prerequisites ({len(df)} rows)")
-            for _, row in df.iterrows():
-                prereq = _s(row.get("Prerequisite", ""))
-                if not prereq:
-                    continue
-                rows.append({
-                    "id": f"pr-{fhash}-{total}", "vector": embed_text(prereq),
-                    "source_file": path.name, "file_hash": fhash,
-                    "sheet": "Prerequisites", "symptom": prereq,
-                    "issue_id": "", "category": _s(row.get("Category", "")),
-                    "problem": _s(row.get("Why It Matters", "")), "root_cause": "",
-                    "fix": "", "severity": "", "present": "", "jira": "",
-                    "discovered": "", "resolved": "", "notes": "",
-                    "do_text": "", "dont_text": "",
-                    "rationale": _s(row.get("Why It Matters", "")),
-                    "prerequisite": prereq,
-                    "how_to_verify": _s(row.get("How to Verify", "")),
-                    "learning": "", "action_taken": "",
-                })
-                total += 1
-
-        elif "Learning" in sn or "learning" in sn.lower() or "Past" in sn:
-            _log_rag.info(f"[RAG/Excel] Sheet '{sn}' → Past Learnings ({len(df)} rows)")
-            for _, row in df.iterrows():
-                went_wrong = _s(row.get("What Went Wrong", ""))
-                learning   = _s(row.get("Key Learning", ""))
-                search_text = f"{went_wrong} / {learning}".strip(" /")
-                if not search_text:
-                    continue
-                rows.append({
-                    "id": f"pl-{fhash}-{total}", "vector": embed_text(search_text),
-                    "source_file": path.name, "file_hash": fhash,
-                    "sheet": "Past Learnings", "symptom": search_text,
-                    "issue_id": "", "category": "",
-                    "problem": _s(row.get("Incident Summary", "")),
-                    "root_cause": went_wrong, "fix": _s(row.get("What Worked Well", "")),
-                    "severity": "",
-                    "present": _s(row.get("Prevented Recurrence?", "")),
-                    "jira": _s(row.get("Jira / Postmortem", "")),
-                    "discovered": _s(row.get("Incident Date", "")), "resolved": "", "notes": "",
-                    "do_text": "", "dont_text": "", "rationale": "",
-                    "prerequisite": "", "how_to_verify": "",
-                    "learning": learning, "action_taken": _s(row.get("Action Taken", "")),
-                })
-                total += 1
+        # ── Sheet type detection ──────────────────────────────────────────────
+        sn_l = sn.lower()
+        if "known" in sn_l or "issue" in sn_l:
+            sheet_type = "Known Issues"
+            id_prefix  = "ki"
+        elif "dos" in sn_l or "don" in sn_l or "donts" in sn_l or "practice" in sn_l:
+            sheet_type = "Dos and Donts"
+            id_prefix  = "dd"
+        elif "prereq" in sn_l or "prerequisite" in sn_l or "requirement" in sn_l:
+            sheet_type = "Prerequisites"
+            id_prefix  = "pr"
+        elif "learn" in sn_l or "past" in sn_l or "incident" in sn_l or "postmortem" in sn_l:
+            sheet_type = "Past Learnings"
+            id_prefix  = "pl"
         else:
             _log_rag.info(f"[RAG/Excel] Skipping unrecognised sheet '{sn}'")
+            continue
+
+        _log_rag.info(f"[RAG/Excel] Sheet '{sn}' → {sheet_type} ({len(df)} rows)")
+        cols = list(df.columns)
+
+        matched_cols = set()
+        for role, hints in _SHEET_ROLES.get(sheet_type, {}).items():
+            for hint in hints:
+                for col in cols:
+                    if hint.lower() in col.lower():
+                        matched_cols.add(col)
+
+        _warn_unmatched(sn, cols, matched_cols, _log_rag.warning)
+
+        for _, raw_row in df.iterrows():
+            row = {col: (str(v).strip() if v is not None else "")
+                   for col, v in raw_row.items()}
+            # Normalise nan/None values
+            row = {k: ("" if v.lower() in ("none","nan","n/a","-","nat") else v)
+                   for k, v in row.items()}
+
+            resolved, search_text = _map_row(row, sheet_type, cols)
+            if not search_text:
+                continue
+
+            rows.append({
+                "id":          f"{id_prefix}-{fhash}-{total}",
+                "vector":      embed_text(search_text),
+                "source_file": path.name,
+                "file_hash":   fhash,
+                "sheet":       sheet_type,
+                "symptom":     search_text,
+                # Canonical fields — populated from resolved roles where available
+                "issue_id":    resolved.get("issue_id",    ""),
+                "category":    resolved.get("category",    ""),
+                "problem":     resolved.get("problem",     ""),
+                "root_cause":  resolved.get("root_cause",  ""),
+                "fix":         resolved.get("fix",         ""),
+                "severity":    resolved.get("severity",    ""),
+                "present":     resolved.get("present",     ""),
+                "jira":        resolved.get("jira",        ""),
+                "discovered":  resolved.get("discovered",  ""),
+                "resolved":    resolved.get("resolved",    ""),
+                "notes":       resolved.get("notes",       ""),
+                "do_text":     resolved.get("do_text",     ""),
+                "dont_text":   resolved.get("dont_text",   ""),
+                "rationale":   resolved.get("rationale",   ""),
+                "prerequisite": resolved.get("prerequisite",""),
+                "how_to_verify": resolved.get("how_to_verify",""),
+                "learning":    resolved.get("learning",    ""),
+                "action_taken": resolved.get("action_taken",""),
+            })
+            total += 1
 
     if not rows:
         return {"file": path.name, "status": "empty", "chunks": 0}
@@ -577,10 +700,11 @@ def rag_retrieve(query: str, top_k: int = TOP_K, doc_type: Optional[str] = None,
                     elif sheet == "Past Learnings":
                         lines.append(
                             f"[{sheet}] {hit.get('discovered','')} | relevance:{sim}\n"
-                            f"  Incident  : {hit.get('problem','')}\n"
-                            f"  Went wrong: {hit.get('root_cause','')}\n"
-                            f"  Learning  : {hit.get('learning','')}\n"
-                            f"  Action    : {hit.get('action_taken','')}\n"
+                            f"  Incident         : {hit.get('problem','')}\n"
+                            f"  Potential Cause  : {hit.get('root_cause','')}\n"
+                            f"  Resolution/Fix   : {hit.get('fix','') or hit.get('learning','')}\n"
+                            f"  Action Taken     : {hit.get('action_taken','')}\n"
+                            + (f"  Jira             : {hit.get('jira','')}\n" if hit.get('jira') else "")
                         )
                     else:
                         lines.append(f"[{sheet}] relevance:{sim}\n  {hit.get('symptom','')}\n")
@@ -2263,16 +2387,46 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
     # return the ingest reminder immediately — never pass to the LLM.
     # Local LLMs reliably ignore system-prompt-only instructions when context is absent,
     # so this must be enforced in code, not just in the prompt.
-    _no_context = (
-        not context
-        or not context.strip()
-        or context == "No relevant documentation found."
-        or (isinstance(context, str) and context.startswith("KB_EMPTY:"))
+    # Distinguish three distinct "no context" situations:
+    #  1. KB is empty (KB_EMPTY sentinel)  → ingest reminder
+    #  2. KB has content but no match found → "nothing found for that query"
+    #  3. Vague / gibberish input           → "didn't understand" regardless of KB state
+    _kb_is_empty  = not context or not context.strip() or (
+        isinstance(context, str) and context.startswith("KB_EMPTY:")
     )
+    _no_match     = (
+        isinstance(context, str)
+        and context.strip() == "No relevant documentation found."
+    )
+    _no_context   = _kb_is_empty or _no_match
+
+    # Vague / gibberish detector — check this FIRST, before KB state checks,
+    # because we always want "didn't understand" regardless of whether the KB
+    # is empty or full.
+    _VAGUE_THRESHOLD = 6   # questions shorter than this (stripped) are likely vague
+    _q_stripped = question.strip()
+    _is_vague = (
+        len(_q_stripped) < _VAGUE_THRESHOLD
+        or not any(c.isalpha() for c in _q_stripped)
+        or (len(_q_stripped.split()) <= 2
+            and not _is_kb_topic(question)
+            and not any(p in _q_stripped.lower()
+                        for p in ("who", "what", "how", "why", "when", "list",
+                                  "show", "give", "any", "all", "is", "are")))
+    )
+    _MSG_VAGUE = (
+        "Sorry, I didn't quite understand your question. Could you rephrase it?\n"
+        "For example:\n"
+        "\u2022 List known issues with Longhorn\n"
+        "\u2022 What are the prerequisites for ECS upgrade?\n"
+        "\u2022 What are the dos and don'ts for storage?\n"
+        "\u2022 Any past incidents with Vault?"
+    )
+    if _is_vague:
+        return _MSG_VAGUE
+
     if _no_context:
-        if _is_kb_topic(question):
-            return _MSG_NO_INGEST
-        # Identity / greeting with empty KB — return hardcoded intro, not a fake LLM call.
+        # Identity / greeting — return intro regardless of KB state
         _GREETING_PATTERNS = (
             "what can you do", "what do you do", "what can you help",
             "who are you", "what are you", "tell me about yourself",
@@ -2293,7 +2447,23 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
                 "'What are the dos and don'ts for storage?', "
                 "'What are the prerequisites for ECS upgrade?'"
             )
-        # Non-KB, non-greeting with empty KB
+        if _is_kb_topic(question):
+            if _no_match:
+                # KB is ingested but nothing matched this query
+                return (
+                    "No results found in the knowledge base for that query. "
+                    "Try rephrasing, or ask about: known issues, dos and don'ts, "
+                    "prerequisites, or past learnings."
+                )
+            # KB is genuinely empty
+            return _MSG_NO_INGEST
+        # Non-KB, non-greeting, non-vague question with no context
+        if _no_match:
+            return (
+                "No results found for that query. "
+                "The knowledge base covers ECS/Kubernetes known issues, dos and don'ts, "
+                "prerequisites, and past learnings. Try asking about one of those topics."
+            )
         return _MSG_NO_INGEST
 
     try:
