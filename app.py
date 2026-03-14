@@ -933,9 +933,11 @@ def build_agent():
             "list pods", "list nodes", "list pvc", "list services",
         )
         _COMPARISON_KEYWORDS = (
-            "most", "least", "fewest", "highest", "lowest", "which namespace",
-            "which node", "rank", "top", "bottom", "compare",
-            "more than", "less than", "most pods", "least pods",
+            "most", "least", "fewest", "highest", "lowest",
+            "which namespace has more", "which node has more",
+            "which node uses", "which namespace uses",
+            "rank", "top", "bottom", "compare",
+            "most pods", "least pods",
         )
         _ENUMERATION_PROBLEM_KEYWORDS = (
             "which pods", "what pods", "pods have", "pods are", "pods with",
@@ -945,6 +947,14 @@ def build_agent():
             "crashloopbackoff", "not running", "not ready", "not starting",
             "problem to start", "fail to start", "failed to start",
             "cannot start", "not starting", "unable to start",
+            # PVC state enumeration
+            "which pvc", "what pvc", "any pvc", "pvcs not", "pvc not",
+            "not bound", "unbound", "pvc stuck", "pvc pending", "pvc lost",
+            "which persistent", "any persistent",
+            # Restart threshold enumeration
+            "restarted more than", "more than", "restarted over",
+            "restart more than", "restarts more than", "times in",
+            "pods with more", "pods restarted",
         )
         _oq = original_question.lower()
         is_list_query = (
@@ -991,7 +1001,23 @@ def build_agent():
 
         is_health_summary = len(tool_results) >= 3 and not is_list_query and not is_enumeration_query
 
-        if is_health_summary:
+        _PVC_STATE_KEYWORDS = (
+            "which pvc", "what pvc", "any pvc", "pvcs not", "pvc not",
+            "not bound", "unbound", "pvc stuck", "pvc pending", "pvc lost",
+            "which persistent", "any persistent",
+        )
+        is_pvc_state_query = any(k in _oq for k in _PVC_STATE_KEYWORDS)
+
+        if is_pvc_state_query:
+            synthesis_prompt = (
+                f"Question: {original_question}\n\n"
+                f"Tool Results:\n{combined}\n"
+                "List EVERY non-Bound PVC from the tool results above. "
+                "Include: namespace/pvc-name, phase (Pending/Lost/etc), storage class, and capacity. "
+                "If no non-Bound PVCs exist, say so explicitly. "
+                "Do NOT include Bound PVCs. Do NOT summarise — list each one individually."
+            )
+        elif is_health_summary:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
@@ -1043,14 +1069,20 @@ def build_agent():
                 "Answer in bullet points. First bullet: overall verdict. "
                 "Subsequent bullets: only facts explicitly stated in the tool results above."
             )
-        elif is_enumeration_query and not is_comparison_query:
+        elif is_enumeration_query:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
                 "List EVERY pod that appears in the tool results above. "
                 "Do NOT skip, summarise, or omit any pod — include all of them. "
-                "For each pod state: namespace/name, phase or status (e.g. CrashLoopBackOff, Pending, Init), restart count, and a one-line reason if available. "
-                "If no unhealthy pods are found, say so explicitly. "
+                "Do NOT write prose sentences — use one bullet per pod. "
+                "For each pod use this exact format:\n"
+                "  - `namespace/pod-name`: <phase> | Restarts: <N> | Cause: <reason>\n"
+                "Determine the cause from: exit code, OOMKilled, liveness probe failure, "
+                "CrashLoopBackOff reason, StartError, or the last log lines if present. "
+                "If the reason is not in the tool output, write Cause: unknown. "
+                "Note: restart counts are totals since pod creation, not a 24h window. "
+                "If no matching pods are found, say so explicitly. "
                 "No preamble. No closing remarks."
             )
         elif is_list_query and not is_comparison_query:
@@ -2231,10 +2263,38 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
     # return the ingest reminder immediately — never pass to the LLM.
     # Local LLMs reliably ignore system-prompt-only instructions when context is absent,
     # so this must be enforced in code, not just in the prompt.
-    if not context or not context.strip() or context == "No relevant documentation found.":
+    _no_context = (
+        not context
+        or not context.strip()
+        or context == "No relevant documentation found."
+        or (isinstance(context, str) and context.startswith("KB_EMPTY:"))
+    )
+    if _no_context:
         if _is_kb_topic(question):
             return _MSG_NO_INGEST
-        # Non-KB topics (greetings, identity): fall through to LLM for a short intro response
+        # Identity / greeting with empty KB — return hardcoded intro, not a fake LLM call.
+        _GREETING_PATTERNS = (
+            "what can you do", "what do you do", "what can you help",
+            "who are you", "what are you", "tell me about yourself",
+            "introduce yourself", "help me", "what is this",
+            "what questions", "what kind of questions",
+        )
+        if any(p in question.lower() for p in _GREETING_PATTERNS):
+            return (
+                "I'm the ECS Knowledge Bot for Cloudera ECS (Embedded Container Service). "
+                "I can answer questions about:\n"
+                "\u2022 **Known Issues** \u2014 bugs, unresolved problems, and their fixes\n"
+                "\u2022 **Dos and Don'ts** \u2014 operational best practices and what to avoid\n"
+                "\u2022 **Prerequisites** \u2014 what must be in place before deploying or upgrading\n"
+                "\u2022 **Past Learnings** \u2014 postmortems and lessons from past incidents\n\n"
+                "To get started, upload and ingest your knowledge base files via "
+                "\u2699 Settings \u2192 RAG Documents. Then ask things like:\n"
+                "'List known issues with Longhorn', "
+                "'What are the dos and don'ts for storage?', "
+                "'What are the prerequisites for ECS upgrade?'"
+            )
+        # Non-KB, non-greeting with empty KB
+        return _MSG_NO_INGEST
 
     try:
         tok, mdl, is_q3 = globals()["_kb_tokenizer"], globals()["_kb_model"], globals()["_kb_is_qwen3"]
@@ -2360,7 +2420,7 @@ async def api_kb_ask(req: KbAskRequest):
             None, lambda: rag_retrieve(query=req.q, top_k=top_k, sheet=sheet)
         )
         logger.info(f"[API/kb/ask] RAG context chars={len(context)}")
-        no_rag = not context.strip() or context == "No relevant documentation found."
+        no_rag = not context.strip() or context == "No relevant documentation found." or (isinstance(context, str) and context.startswith("KB_EMPTY:"))
         rag_ctx = None if no_rag else context
 
         # Hard short-circuit: if the KB is empty and the question is about an ECS/KB topic,
@@ -2418,7 +2478,7 @@ async def api_kb_stream(req: KbAskRequest):
             context = await _asyncio.get_event_loop().run_in_executor(
                 None, lambda: rag_retrieve(query=q, top_k=top_k, sheet=sheet)
             )
-            no_rag = not context.strip() or context == "No relevant documentation found."
+            no_rag = not context.strip() or context == "No relevant documentation found." or (isinstance(context, str) and context.startswith("KB_EMPTY:"))
             rag_ctx = None if no_rag else context
             match_count = 0
             if not no_rag:

@@ -20,6 +20,7 @@ NS_ALIASES = {
     "controller": "kube-system",
     "apiserver":  "kube-system",
     "api-server": "kube-system",
+    "cdp":         "cdp",
     "prometheus": "monitoring",
     "alertmanager": "monitoring",
 }
@@ -30,7 +31,11 @@ def resolve_namespace(lm: str, req_id: str = "") -> str:
     m = re.search(r'(?:^|\s)(?:in|for|namespace|ns)\s+([a-z0-9-]+)', lm)
     if m:
         raw = m.group(1)
-        if raw not in ("all", "namespace", "ns", "the", "this"):
+        # Exclude PVC/pod state words that appear after "in" but are not namespace names
+        _STATE_WORDS = {"all", "namespace", "ns", "the", "this",
+                        "pending", "lost", "bound", "unbound", "stuck",
+                        "running", "failed", "unknown", "error", "ready"}
+        if raw not in _STATE_WORDS:
             resolved = NS_ALIASES.get(raw, raw)
             _log.debug(f"{tag}[routing] namespace resolved: {raw!r} → {resolved!r} (explicit pattern)")
             return resolved
@@ -121,6 +126,30 @@ def default_tools_for(user_msg: str, req_id: str = "") -> list:
         _log.info(f"{tag}[routing] FALLBACK → get_unhealthy_pods_detail(namespace={ns!r}) (diagnostic)")
         return [("get_unhealthy_pods_detail", {"namespace": ns})]
 
+    # Restart-threshold query: "pods restarted more than N times", "restarted more than 5"
+    # Needs get_unhealthy_pods_detail (has logs + exit codes) not get_pod_status.
+    _is_restart_threshold = (
+        any(k in lm for k in ["restart", "restarted", "restarting"])
+        and any(k in lm for k in ["more than", "over", "greater than",
+                                   "at least", "exceeded", "times"])
+    )
+    if _is_restart_threshold:
+        _log.info(f"{tag}[routing] FALLBACK → get_unhealthy_pods_detail(namespace={ns!r}) (restart threshold)")
+        return [("get_unhealthy_pods_detail", {"namespace": ns})]
+
+    # PVC state query: "which pvc is not bound?", "any unbound pvcs?", "pvc stuck/pending/lost"
+    # Must fire BEFORE _is_pod_health because "pending" is in both PVC and pod keyword sets.
+    _is_pvc_state = (
+        any(k in lm for k in ["pvc", "pvcs", "persistent volume claim", "persistent volume"])
+        and any(k in lm for k in [
+            "not bound", "unbound", "not-bound", "pending", "lost",
+            "stuck", "which pvc", "any pvc", "pvc state", "pvc status",
+        ])
+    )
+    if _is_pvc_state:
+        _log.info(f"{tag}[routing] FALLBACK → get_pvc_status(namespace={ns!r}) (PVC state query)")
+        return [("get_pvc_status", {"namespace": ns, "detail": True})]
+
     _is_pod_health = any(k in lm for k in [
         "pod", "pods", "container", "crashloop", "oomkill", "crashing",
         "not running", "not ready", "failing", "unhealthy", "restart",
@@ -129,6 +158,21 @@ def default_tools_for(user_msg: str, req_id: str = "") -> list:
     if _is_pod_health:
         _log.info(f"{tag}[routing] FALLBACK → get_pod_status(namespace={ns!r}) (pod health)")
         return [("get_pod_status", {"namespace": ns, "show_all": False})]
+
+    # Storage-class-usage query: "what SC is X using?" / "which storage class does vault use?"
+    # These need live PVC data — NOT the static storage class table in the system prompt.
+    # Storage-class-usage: "what SC is X using?" needs live PVC data.
+    # Distinguish from "what storage classes exist?" (static) by requiring
+    # a usage verb — "using/uses/use/used by" — alongside the SC keyword.
+    _is_sc_usage = (
+        any(k in lm for k in ["storage class", "storageclass", "storage-class", " sc "])
+        and any(k in lm for k in ["using", "use", "uses", "used by", "is using",
+                                   "does use", "which sc does", "which storage class does",
+                                   "what sc is", "what storage class is"])
+    )
+    if _is_sc_usage:
+        _log.info(f"{tag}[routing] FALLBACK → get_pvc_status(namespace={ns!r}, detail=True) (SC usage query)")
+        return [("get_pvc_status", {"namespace": ns, "detail": True})]
 
     _is_cluster_health = any(k in lm for k in [
         "cluster", "health", "healthy", "issue", "problem", "anything wrong",
