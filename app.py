@@ -25,7 +25,6 @@ from agent.routing import default_tools_for, resolve_namespace
 _HERE = Path(__file__).resolve().parent
 _decode_secrets_ctx: ContextVar[bool] = ContextVar("decode_secrets", default=False)
 
-# Alias loggers for direct use in the agent logic
 _log_ag = config._log_ag
 _log_rag = config._log_rag
 logger = config.logger
@@ -158,7 +157,7 @@ def _build_llm_gguf():
 def build_agent():
     all_tools = {**K8S_TOOLS, **RAG_TOOLS}
     tool_schemas = [_registry_to_openai_schema(n, c) for n, c in all_tools.items()]
-    tool_names   = [s["function"]["name"] for s in tool_schemas]
+    tool_names = [s["function"]["name"] for s in tool_schemas]
     _log_ag.info(f"[build_agent] {len(tool_schemas)} tools: {tool_names}")
 
     tokenizer, model, _is_qwen3 = _build_llm()
@@ -172,7 +171,6 @@ def build_agent():
             return msgs
 
         has_tool_results = any(isinstance(m, ToolMessage) for m in msgs)
-
         if not has_tool_results:
             filtered = [m for m in msgs if isinstance(m, (HumanMessage, SystemMessage))]
             _log_ag.debug(f"[REQ:{req_id}] [prepare_msgs] tool selection — passing {len(filtered)} msg(s)")
@@ -181,15 +179,13 @@ def build_agent():
         original_question = next((m.content for m in msgs if isinstance(m, HumanMessage)), "")
         tool_results = [m for m in msgs if isinstance(m, ToolMessage)]
 
-        _oq_lower = original_question.lower()
         _NS_WORDS = ("namespace", " ns=", " ns ", "in namespace", "for namespace",
-                     "in the namespace", "-n ", "cdp", "cmlwb", "longhorn", "vault",
-                     "cattle", "rancher", "cert", "default namespace")
-        _ns_specified = any(k in _oq_lower for k in _NS_WORDS)
+                     "in the namespace", "-n ", "default namespace")
+        _ns_specified = any(k in original_question.lower() for k in _NS_WORDS)
         _needs_ns = any(
             tc_name in (getattr(m, "name", "") or "")
             for m in msgs if isinstance(m, ToolMessage)
-            for tc_name in ("get_pod_status", "get_deployment_status", "get_daemonset_status",
+            for tc_name in ("get_deployment_status", "get_daemonset_status",
                             "get_statefulset_status", "get_job_status", "get_hpa_status",
                             "get_service_status", "get_ingress_status",
                             "get_resource_quotas", "get_configmap_list", "get_service_accounts")
@@ -208,101 +204,13 @@ def build_agent():
             parts.append(f"--- TOOL RESULT {i} ---\n{body}\n")
         combined = "".join(parts)
 
-        _TOOL_FORMATS = {
-            "get_pod_logs": (
-                "Reproduce the log output EXACTLY as returned by the tool. "
-                "Include every log line with its full timestamp. "
-                "Do NOT summarise, paraphrase, or describe the log content in prose. "
-                "If the tool returned an error, state it exactly."
-            ),
-            "get_unhealthy_pods_detail": (
-                "List EVERY pod from the tool results. "
-                "One bullet per pod. Format: "
-                "`namespace/pod-name`: <phase> | Restarts: <N> | Cause: <reason> "
-                "(use exit code, OOMKilled, liveness probe failure, StartError, or last log lines). "
-                "Do NOT write prose. Do NOT skip any pod."
-            ),
-            "get_pvc_status": (
-                "List every non-Bound PVC from the results. "
-                "Format per PVC: namespace/name, phase, storage class, capacity. "
-                "If all PVCs are Bound, say so explicitly. "
-                "Do NOT include Bound PVCs unless the user asked for all PVCs."
-            ),
-            "get_pv_usage": (
-                "Reproduce the storage usage report in full — do NOT summarise. "
-                "Include every PVC entry: those nearing capacity, within capacity, AND skipped. "
-                "For skipped entries show the exact reason from the tool output."
-            ),
-            "get_coredns_health": (
-                "Report CoreDNS health from the tool results. "
-                "State each pod's phase and readiness. "
-                "Include DNS resolution test results exactly as shown. "
-                "Use bullet points, one per pod/test."
-            ),
-            "describe_pod": (
-                "Report the pod details from the tool results. "
-                "Include: phase, conditions, each container's state and restart count, "
-                "resource requests and limits. Use the exact values from the tool output."
-            ),
-            "query_prometheus_metrics": (
-                "Present the metrics exactly as returned. "
-                "List each series with its last value. Do not round or omit any series."
-            ),
-            "get_pod_images": (
-                "List every pod from the results. "
-                "Format: `namespace/pod-name` [container]: registry/image:tag. "
-                "Do NOT show health fields (phase/restarts/cause) — image and tag only."
-            ),
-            "get_node_resource_requests": (
-                "Reproduce the node resource table exactly. "
-                "Include every node with its CPU and memory figures."
-            ),
-            "kubectl_exec": (
-                "Reproduce the command output VERBATIM. "
-                "Do NOT reformat, summarise, or omit any rows."
-            ),
-            "get_pod_status": (
-                "Reproduce the pod table VERBATIM — every row, every column. "
-                "Do NOT summarise, count, or describe in prose. "
-                "If the result is a single summary sentence (e.g. 'All pods healthy'), "
-                "reproduce it exactly."
-            ),
-            "get_namespace_resource_summary": (
-                "ALWAYS lead with the total figures at the top of the answer: "
-                "total CPU requested, total CPU limit, total memory requested, total memory limit. "
-                "Then list the per-pod breakdown. "
-                "Do NOT start by listing individual pods — the total is the answer to a calculate question."
-            ),
-            "get_node_health": (
-                "Report the node health from the tool results. "
-                "For each node state: name, Ready status, any pressure conditions. "
-                "For GPU nodes include the EXACT GPU count and status string as returned — "
-                "e.g. 'GPU:2/2 (all in use — none free)' or 'GPU:0/2 (none in use — all free)'. "
-                "Do NOT paraphrase GPU status — copy the exact numbers and state label."
-            ),
-            "get_gpu_info": (
-                "Report GPU details from the tool results. "
-                "State the exact GPU model, total allocatable count, and how many are in use vs free. "
-                "Use the exact numbers from the tool output — do NOT say 'available and in use' "
-                "as that is contradictory. State in-use count and free count separately."
-            ),
-        }
-
-        _HEALTH_SWEEP_TOOLS = {
-            "get_node_health", "get_pod_status", "get_deployment_status",
-            "get_pvc_status", "get_events", "get_daemonset_status",
-            "get_statefulset_status", "get_job_status", "get_hpa_status",
-        }
-        _is_health_sweep = (
-            len(tool_results) >= 3
-            and _tools_used.issubset(_HEALTH_SWEEP_TOOLS | {""})
-        )
-
-        _ENUMERATION_TOOLS = {
-            "get_pod_status", "get_deployment_status", "get_daemonset_status",
-            "get_statefulset_status", "get_job_status", "get_hpa_status",
-            "get_service_status", "get_namespace_status",
-        }
+        _TOOL_FORMATS = {name: "Reproduce the tool output EXACTLY as returned, without summarising or changing anything."
+                         for name in (
+            "get_pod_logs", "get_unhealthy_pods_detail", "get_pvc_status", "get_pv_usage",
+            "get_coredns_health", "describe_pod", "query_prometheus_metrics", "get_pod_images",
+            "get_node_resource_requests", "kubectl_exec", "get_pod_status", "get_namespace_resource_summary",
+            "get_node_health", "get_gpu_info"
+        )}
 
         _single_tool = next(iter(_tools_used - {""}), None)
         if len(_tools_used - {""}) == 1 and _single_tool in _TOOL_FORMATS:
@@ -311,42 +219,23 @@ def build_agent():
                 f"Tool Results:\n{combined}\n"
                 + _TOOL_FORMATS[_single_tool]
             )
-
-        elif _is_health_sweep:
-            synthesis_prompt = (
-                f"Question: {original_question}\n\n"
-                f"Tool Results:\n{combined}\n"
-                "Write a concise cluster health summary:\n"
-                "1. Overall status in one sentence (healthy / issues found).\n"
-                "2. If any problems exist, list them specifically: exact pod, node, "
-                "deployment, PVC, or event with its state.\n"
-                "3. If everything is healthy, say so briefly — do not list healthy items.\n"
-                "Use plain sentences. No markdown headers. No closing remarks."
-            )
-
-        elif _single_tool in _ENUMERATION_TOOLS:
-            synthesis_prompt = (
-                f"Question: {original_question}\n\n"
-                f"Tool Results:\n{combined}\n"
-                "List EVERY item from the tool results. "
-                "One bullet per item. Include namespace, name, and relevant state. "
-                "Do NOT skip or summarise any item. "
-                "If the result is a summary line (e.g. 'All pods healthy'), "
-                "reproduce it exactly without expansion."
-            )
-
         else:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
-                "Answer the question using only the tool results above. "
-                "Be specific — name exact pods, nodes, or resources. "
-                "If the results contain a list, reproduce it in full. "
-                "If the question asks for a count, state the number directly. "
-                "No preamble. No closing remarks."
+                "Reproduce the tool output EXACTLY as returned, without summarising or changing anything."
             )
 
         return [HumanMessage(content=_ns_prefix + synthesis_prompt)]
+
+    return {
+        "tool_schemas": tool_schemas,
+        "tokenizer": tokenizer,
+        "model": model,
+        "is_qwen3": _is_qwen3,
+        "prompt": prompt,
+        "prepare_messages": _prepare_messages_for_hf,
+    }
 
     def _msgs_to_qwen3(msgs: list, include_tools: bool) -> list:
         result = []
@@ -607,8 +496,6 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
         return re.sub(r'<think>[\s\S]*?</think>\s*', '', raw).strip() or context or ""
     except Exception as exc: 
         return context or ""
-
-# ── 3. FASTAPI LIFESPAN & SETUP ──────────────────────────────────────────────
 
 def _run_startup_checks():
     SMOKE_TESTS = [("get_node_health", {}), ("get_namespace_status", {}), ("get_pod_status", {"namespace": "all"})]
