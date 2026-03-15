@@ -22,9 +22,9 @@ from tools.tools_k8s import K8S_TOOLS, reload_kubeconfig, _core as _k8s_core
 from agent.bypass import should_bypass_llm, build_direct_answer
 from agent.routing import default_tools_for, resolve_namespace
 
-_decode_secrets_ctx: ContextVar[bool] = ContextVar("decode_secrets", default=False)
+_HERE = Path(__file__).resolve().parent
 
-# ── 1. SCHEMAS ───────────────────────────────────────────────────────────────
+_decode_secrets_ctx: ContextVar[bool] = ContextVar("decode_secrets", default=False)
 
 class HistoryMessage(BaseModel): role: str; content: str
 class ChatRequest(BaseModel): message: str; decode_secrets: bool = False; history: list[HistoryMessage] = []; max_new_tokens: int = 0
@@ -35,8 +35,6 @@ class KubeconfigRequest(BaseModel): kubeconfig: str
 class PromptUpdateRequest(BaseModel): content: str
 class ToolCallRequest(BaseModel): name: str; args: dict = {}
 class IngestRequest(BaseModel): docs_dir: str; force: bool = False
-
-# ── 2. AGENT & LLM LOGIC ─────────────────────────────────────────────────────
 
 _PROMPT_FILE = config._HERE / "config" / "system_prompt.txt"
 
@@ -392,282 +390,7 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
     except Exception as exc: 
         return context or ""
 
-# ── 3. API ENDPOINTS ─────────────────────────────────────────────────────────
-
-app = FastAPI(title="Cloudera ECS AI Ops")
-
-@app.get("/health")
-async def health():
-    stats = get_doc_stats()
-    return {"status": "ok", "model": config.LLM_MODEL, "num_gpu": config.NUM_GPU, "lancedb_docs": stats["docs_chunks"], "lancedb_excel_rows": stats["excel_rows"], "k8s_tools": len(K8S_TOOLS), "cluster_server": config.CLUSTER_SERVER}
-
-@app.post("/api/kubeconfig")
-async def apply_kubeconfig(req: KubeconfigRequest):
-    try:
-        result = reload_kubeconfig(req.kubeconfig)
-        if result.get("server") and result["server"] != "unknown":
-            config.CLUSTER_SERVER = re.sub(r'^https?://', '', result["server"]).strip()
-        return result
-    except ValueError as e: return _JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
-
-@app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    if not req.message.strip(): raise HTTPException(400, "Empty message")
-    try: return ChatResponse(**await run_agent(req.message))
-    except Exception as e: raise HTTPException(500, f"Agent failed: {e}")
-
-@app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
-    if not req.message.strip(): raise HTTPException(400, "Empty message")
-    _decode_secrets_ctx.set(req.decode_secrets)
-    import asyncio
-    async def _keepalive_stream():
-        queue, _SENTINEL = asyncio.Queue(), object()
-        async def _producer():
-            try:
-                async for chunk in run_agent_streaming(req.message, req.history, req.max_new_tokens): await queue.put(chunk)
-            finally: await queue.put(_SENTINEL)
-        task = asyncio.ensure_future(_producer())
-        try:
-            while True:
-                try: item = await asyncio.wait_for(queue.get(), timeout=10)
-                except asyncio.TimeoutError: yield ": keep-alive\n\n"; continue
-                if item is _SENTINEL: break
-                yield item
-        finally: task.cancel()
-    return StreamingResponse(_keepalive_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-@app.get("/metrics")
-async def metrics():
-    cpu_per, mem, freq = psutil.cpu_percent(interval=0.2, percpu=True), psutil.virtual_memory(), psutil.cpu_freq()
-    return {
-        "cpu_total": round(psutil.cpu_percent(interval=None), 1), 
-        "cpu_per_core": [round(p, 1) for p in cpu_per], 
-        "cpu_count": psutil.cpu_count(logical=True), 
-        "freq_mhz": round(freq.current) if freq else 0, 
-        "load_avg": [round(x, 2) for x in psutil.getloadavg()], 
-        "mem_total_gb": round(mem.total / 1e9, 1), 
-        "mem_used_gb": round(mem.used / 1e9, 1), 
-        "mem_pct": mem.percent, 
-        "num_gpu": config.NUM_GPU
-    }
-
-@app.post("/ingest")
-async def ingest_api(req: IngestRequest):
-    results = ingest_directory(req.docs_dir, force=req.force)
-    return {"results": results, "total_files": len(results), "total_chunks": sum(r.get("chunks", 0) for r in results)}
-
-@app.post("/api/ingest/upload")
-async def ingest_upload_real(files: list[UploadFile] = File(...), force: str = FastAPIForm(default="false")):
-    do_force = force.lower() in ("true", "1", "yes")
-    docs_dir = config._HERE / "docs"
-    docs_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for upload in files:
-        suffix = Path(upload.filename).suffix.lower()
-        if suffix not in (".md", ".pdf", ".txt", ".xlsx", ".xls"):
-            results.append({"file": upload.filename, "status": "rejected", "chunks": 0, "error": f"Unsupported type '{suffix}'."})
-            continue
-        dest = docs_dir / upload.filename
-        content = await upload.read()
-        dest.write_bytes(content)
-        if suffix in (".xlsx", ".xls"): result = ingest_excel(str(dest), force=do_force)
-        else: result = ingest_file(str(dest), force=do_force)
-        results.append(result)
-    return {"results": results, "total_files": len(results), "total_chunks": sum(r.get("chunks", 0) for r in results)}
-
-@app.post("/api/ask")
-async def api_ask(req: AskRequest):
-    if not req.q.strip(): return _JSONResponse(status_code=400, content={"error": "q must not be empty"})
-    try:
-        result = await run_agent(req.q)
-        return {"question": req.q, "answer": result["response"], "tools_used": result["tools_used"], "iterations": result["iterations"], "elapsed_seconds": result["elapsed_seconds"]}
-    except Exception as e: return _JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.post("/api/tool")
-async def api_tool(req: ToolCallRequest):
-    import asyncio, inspect
-    entry = K8S_TOOLS.get(req.name)
-    if not entry: return _JSONResponse(status_code=404, content={"error": f"Tool '{req.name}' not found.", "available": list(K8S_TOOLS.keys())})
-    fn = entry.get("fn")
-    if fn is None: return _JSONResponse(status_code=501, content={"error": f"Tool '{req.name}' has no callable fn."})
-    try:
-        if inspect.iscoroutinefunction(fn): raw = await fn(**req.args)
-        else: raw = await asyncio.get_event_loop().run_in_executor(None, lambda: fn(**req.args))
-        return {"tool": req.name, "args": req.args, "output": raw}
-    except TypeError as e: return _JSONResponse(status_code=400, content={"error": f"Bad args for '{req.name}': {e}"})
-    except Exception as e: return _JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.get("/api/tools")
-async def api_tools():
-    import inspect as _inspect
-    out = {}
-    for name, entry in K8S_TOOLS.items():
-        fn = entry.get("fn")
-        params = {}
-        if fn:
-            for pname, p in _inspect.signature(fn).parameters.items():
-                params[pname] = {"default": None if p.default is _inspect.Parameter.empty else p.default, "required": p.default is _inspect.Parameter.empty}
-        out[name] = {"description": entry.get("description", ""), "parameters": params}
-    return {"count": len(out), "tools": out}
-
-@app.get("/api/pods")
-async def api_pods(ns: str = "all"):
-    from tools.tools_k8s import get_pod_status
-    import asyncio
-    raw = await asyncio.get_event_loop().run_in_executor(None, lambda: get_pod_status(namespace=ns, show_all=True, raw_output=False))
-    return {"namespace": ns, "output": raw}
-
-@app.get("/api/pods/raw")
-async def api_pods_raw(ns: str = "all"):
-    from tools.tools_k8s import get_pod_status
-    import asyncio
-    raw = await asyncio.get_event_loop().run_in_executor(None, lambda: get_pod_status(namespace=ns, show_all=True, raw_output=True))
-    return {"namespace": ns, "output": raw}
-
-@app.get("/api/nodes")
-async def api_nodes():
-    from tools.tools_k8s import get_node_health
-    import asyncio
-    raw = await asyncio.get_event_loop().run_in_executor(None, get_node_health)
-    return {"output": raw}
-
-@app.get("/api/events")
-async def api_events(ns: str = "all", warn: int = 0):
-    from tools.tools_k8s import get_events
-    import asyncio
-    raw = await asyncio.get_event_loop().run_in_executor(None, lambda: get_events(namespace=ns, warning_only=bool(warn)))
-    return {"namespace": ns, "warnings_only": bool(warn), "output": raw}
-
-@app.get("/api/deployments")
-async def api_deployments(ns: str = "all"):
-    from tools.tools_k8s import get_deployment_status
-    import asyncio
-    raw = await asyncio.get_event_loop().run_in_executor(None, lambda: get_deployment_status(namespace=ns))
-    return {"namespace": ns, "output": raw}
-
-@app.get("/api/pvcs")
-async def api_pvcs(ns: str = "all"):
-    from tools.tools_k8s import get_pvc_status
-    import asyncio
-    raw = await asyncio.get_event_loop().run_in_executor(None, lambda: get_pvc_status(namespace=ns))
-    return {"namespace": ns, "output": raw}
-
-@app.get("/api/namespaces")
-async def api_namespaces():
-    from tools.tools_k8s import get_namespace_status
-    import asyncio
-    raw = await asyncio.get_event_loop().run_in_executor(None, get_namespace_status)
-    return {"output": raw}
-
-@app.get("/api/rag/stats")
-async def api_rag_stats():
-    return get_doc_stats()
-
-@app.get("/api/rag/query")
-async def api_rag_query(query: str, top_k: int = 50, sheet: Optional[str] = None):
-    if not query.strip(): return {"answer": "", "context": ""}
-    top_k = max(10, min(top_k, 500))
-    try:
-        context = rag_retrieve(query=query, top_k=top_k, sheet=sheet)
-        if not context.strip(): context = "No matching entries found in the knowledge base for this query."
-        return {"answer": context, "query": query, "sheet": sheet or "all"}
-    except Exception as e: return _JSONResponse(status_code=500, content={"error": str(e)})
-
-@app.post("/api/kb/ask")
-async def api_kb_ask(req: KbAskRequest):
-    if not req.q.strip(): return _JSONResponse(status_code=400, content={"error": "q must not be empty"})
-    top_k, sheet = max(10, min(req.top_k, 500)), req.sheet
-    if not sheet:
-        ql = req.q.lower()
-        if any(k in ql for k in ["past learning", "incident"]): sheet = "Past Learnings"
-        elif any(k in ql for k in ["known issue"]): sheet = "Known Issues"
-        elif any(k in ql for k in ["dos and don", "best practice"]): sheet = "Dos and Donts"
-        elif any(k in ql for k in ["prerequisite"]): sheet = "Prerequisites"
-
-    import asyncio
-    context = await asyncio.get_event_loop().run_in_executor(None, lambda: rag_retrieve(query=req.q, top_k=top_k, sheet=sheet))
-    no_rag = not context.strip() or context == "No relevant documentation found." or (isinstance(context, str) and context.startswith("KB_EMPTY:"))
-    
-    if no_rag and _is_kb_topic(req.q): return {"answer": _MSG_NO_INGEST, "query": req.q, "top_k": top_k}
-    answer = await asyncio.get_event_loop().run_in_executor(None, lambda: _llm_synthesise(None if no_rag else context, req.q, top_k, req.max_tokens))
-    return {"answer": answer or "I'm sorry, I was unable to generate a response.", "query": req.q, "top_k": top_k}
-
-@app.post("/api/kb/stream")
-async def api_kb_stream(req: KbAskRequest):
-    import asyncio as _asyncio, time as _time
-    async def _generate():
-        def _sse(obj): return f"data: {json.dumps(obj)}\n\n"
-        start, q = _time.time(), req.q.strip()
-        if not q: yield _sse({"type": "error", "text": "Empty query"}); return
-        top_k, sheet = max(10, min(req.top_k, 500)), req.sheet
-        if not sheet:
-            ql = q.lower()
-            if any(k in ql for k in ["past learning", "incident"]): sheet = "Past Learnings"
-            elif any(k in ql for k in ["known issue"]): sheet = "Known Issues"
-            elif any(k in ql for k in ["dos and don"]): sheet = "Dos and Donts"
-            elif any(k in ql for k in ["prerequisite"]): sheet = "Prerequisites"
-
-        yield _sse({"type": "question", "text": q})
-        yield _sse({"type": "status", "text": f"Searching knowledge base{(' · sheet: ' + sheet) if sheet else ''}…"})
-
-        try:
-            context = await _asyncio.get_event_loop().run_in_executor(None, lambda: rag_retrieve(query=q, top_k=top_k, sheet=sheet))
-            no_rag = not context.strip() or context == "No relevant documentation found." or (isinstance(context, str) and context.startswith("KB_EMPTY:"))
-            if no_rag and _is_kb_topic(q):
-                yield _sse({"type": "result", "answer": _MSG_NO_INGEST, "query": q, "elapsed": round(_time.time() - start, 1), "top_k": top_k})
-                return
-            yield _sse({"type": "status", "text": f"Found match(es) — synthesising answer…" if not no_rag else "No matches found — generating response…"})
-            answer = await _asyncio.get_event_loop().run_in_executor(None, lambda: _llm_synthesise(None if no_rag else context, q, top_k, req.max_tokens))
-            yield _sse({"type": "result", "answer": answer or "I'm sorry, I was unable to generate a response.", "query": q, "elapsed": round(_time.time() - start, 1), "top_k": top_k})
-        except Exception as exc: yield _sse({"type": "error", "text": str(exc)})
-    return StreamingResponse(_generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-@app.get("/api/prompt")
-async def api_get_prompt():
-    if not _PROMPT_FILE.exists(): return _JSONResponse(status_code=404, content={"error": "config/system_prompt.txt not found"})
-    return {"file": str(_PROMPT_FILE), "content": _PROMPT_FILE.read_text(encoding="utf-8")}
-
-@app.put("/api/prompt")
-async def api_put_prompt(req: PromptUpdateRequest):
-    if not req.content.strip(): return _JSONResponse(status_code=400, content={"error": "content must not be empty"})
-    _PROMPT_FILE.write_text(req.content, encoding="utf-8")
-    global _agent
-    _agent = None
-    return {"ok": True, "chars": len(req.content), "message": "Prompt saved. Agent will rebuild on next request."}
-
-@app.post("/api/reload-prompt")
-async def api_reload_prompt():
-    if not _PROMPT_FILE.exists(): return _JSONResponse(status_code=404, content={"error": "config/system_prompt.txt not found"})
-    global _agent
-    _agent = None
-    return {"ok": True, "chars": len(_PROMPT_FILE.read_text(encoding="utf-8")), "message": "Agent cache cleared. New prompt active on next request."}
-
-@app.get("/api/config")
-async def api_get_config():
-    import tools.tools_k8s as _tk
-    return {"kubectl_max_chars": _tk._KUBECTL_MAX_OUT, "max_new_tokens": config.MAX_NEW_TOKENS, "llm_timeout": config.LLM_TIMEOUT}
-
-@app.post("/api/config")
-async def api_set_config(body: dict):
-    import tools.tools_k8s as _tk
-    updated = {}
-    if "kubectl_max_chars" in body:
-        val = max(1000, min(int(body["kubectl_max_chars"]), 200000))
-        _tk._KUBECTL_MAX_OUT = val
-        updated["kubectl_max_chars"] = val
-    if "max_new_tokens" in body:
-        val = max(256, min(int(body["max_new_tokens"]), 16384))
-        config.MAX_NEW_TOKENS = val
-        updated["max_new_tokens"] = val
-    if "llm_timeout" in body:
-        val = max(30, min(int(body["llm_timeout"]), 1800))
-        config.LLM_TIMEOUT = val
-        updated["llm_timeout"] = val
-    if not updated: return _JSONResponse(status_code=400, content={"error": "No recognised config keys in body"})
-    return {"ok": True, "updated": updated}
-
-# ── 4. LIFESPAN & STARTUP ────────────────────────────────────────────────────
+from api.api_router import api_router
 
 def _run_startup_checks():
     SMOKE_TESTS = [("get_node_health", {}), ("get_namespace_status", {}), ("get_pod_status", {"namespace": "all"})]
@@ -681,8 +404,8 @@ def _run_startup_checks():
             else: config.logger.info(f"[Self-test] ✓ {name}: {result.replace(chr(10), ' ')[:80]}…")
         except Exception as e: config.logger.warning(f"[Self-test] ⚠ {name} raised: {e}")
 
-@app.on_event("startup")
-async def _startup_event():
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
     config.logger.info("=" * 60)
     config.logger.info(f"Cloudera ECS AI Ops")
     config.logger.info(f"  LLM      : {config.LLM_MODEL}")
@@ -701,27 +424,25 @@ async def _startup_event():
     config.logger.info("[Agent] Pre-warming LLM…")
     get_agent()
     config.logger.info("Startup complete ✓")
-
-@app.on_event("shutdown")
-async def _shutdown_event():
+    yield
     config.logger.info("Shutting down")
 
+app = FastAPI(title="Cloudera ECS AI Ops", lifespan=_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-if os.path.exists("web/static"): app.mount("/static", StaticFiles(directory="web/static"), name="static")
+app.include_router(api_router)
 
-@app.get("/")
+if _HERE.joinpath("web", "static").exists():
+    app.mount("/static", StaticFiles(directory=str(_HERE / "web" / "static")), name="static")
+
+@app.get("/", response_class=FileResponse)
 async def serve_ui():
-    if os.path.exists("web/index.html"): 
-        return FileResponse("web/index.html", media_type="text/html")
-    return _JSONResponse(
-        status_code=404, 
-        content={"error": "web/index.html not found"}
-    )
+    if _HERE.joinpath("web", "index.html").exists():
+        return FileResponse(str(_HERE / "web" / "index.html"), media_type="text/html")
+    return _JSONResponse(status_code=404, content={"error": "web/index.html not found"})
 
 if __name__ == "__main__":
     if config.ARGS.ingest:
-        from rag.ingest import ingest_directory
         print(f"\n📂 Ingesting documents from: {config.ARGS.ingest}  (force={config.ARGS.force})")
         init_db()
         results = ingest_directory(config.ARGS.ingest, force=config.ARGS.force)
