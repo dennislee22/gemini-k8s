@@ -893,104 +893,85 @@ def get_hpa_status(namespace: str = "all") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-def get_pvc_status(namespace: str = "all", detail: bool = False) -> str:
-    _AM = {"ReadWriteOnce": "RWO", "ReadWriteMany": "RWX", "ReadOnlyMany": "ROX",
-           "ReadWriteOncePod": "RWOP"}
-
-    def _access(pvc):
-        modes = pvc.spec.access_modes or []
-        return ",".join(_AM.get(m, m) for m in modes) or "?"
+def get_pvc_status(namespace: str = "all") -> str:
+    _AM = {
+        "ReadWriteOnce": "RWO",
+        "ReadWriteMany": "RWX",
+        "ReadOnlyMany": "ROX"
+    }
 
     try:
-        pvcs = (_core.list_persistent_volume_claim_for_all_namespaces()
-                if namespace == "all"
-                else _core.list_namespaced_persistent_volume_claim(
-                    namespace=namespace))
-        if not pvcs.items:
+        pvcs = (
+            _core.list_persistent_volume_claim_for_all_namespaces()
+            if namespace == "all"
+            else _core.list_namespaced_persistent_volume_claim(namespace=namespace)
+        )
+
+        pods = (
+            _core.list_pod_for_all_namespaces()
+            if namespace == "all"
+            else _core.list_namespaced_pod(namespace=namespace)
+        )
+
+        pvc_to_pods = {}
+
+        # Map PVC -> pods using it
+        for pod in pods.items:
+            for vol in pod.spec.volumes or []:
+                if vol.persistent_volume_claim:
+                    claim = vol.persistent_volume_claim.claim_name
+                    ns = pod.metadata.namespace
+                    key = f"{ns}/{claim}"
+                    pvc_to_pods.setdefault(key, []).append(pod.metadata.name)
+
+        rows = []
+
+        for pvc in pvcs.items:
+            ns = pvc.metadata.namespace
+            name = pvc.metadata.name
+
+            cap = (pvc.status.capacity or {}).get("storage", "?")
+            vol = pvc.spec.volume_name or "<unbound>"
+            phase = pvc.status.phase or "Unknown"
+
+            modes = pvc.spec.access_modes or []
+            access = ",".join(_AM.get(m, m) for m in modes) or "?"
+
+            key = f"{ns}/{name}"
+            pods_using = pvc_to_pods.get(key)
+
+            pod = ",".join(pods_using) if pods_using else "unbound"
+
+            rows.append([ns, name, vol, cap, access, phase, pod])
+
+        if not rows:
             return f"No PVCs found in namespace '{namespace}'."
 
-        total = len(pvcs.items)
+        headers = ["NAMESPACE", "PVC", "VOLUME", "CAPACITY", "ACCESS", "STATUS", "POD"]
 
-        if namespace != "all":
-            bound_by_am: dict = {}
-            non_bound = []
-            for pvc in pvcs.items:
-                phase = pvc.status.phase or "Unknown"
-                sc    = pvc.spec.storage_class_name or "default"
-                cap   = (pvc.status.capacity or {}).get("storage", "?")
-                vol   = pvc.spec.volume_name or "<unbound>"
-                am    = _access(pvc)
-                if phase == "Bound":
-                    if detail:
-                        key = f"{am} ({sc})"
-                        bound_by_am.setdefault(key, []).append(
-                            f"    {pvc.metadata.name}: {cap} | volume:{vol}")
-                    else:
-                        key = f"{am} ({sc})"
-                        bound_by_am[key] = bound_by_am.get(key, 0) + 1
-                else:
-                    non_bound.append(
-                        f"  {pvc.metadata.name}: {phase} ⚠ | "
-                        f"capacity:{cap} | access:{am} | class:{sc} | volume:{vol}")
+        col_widths = [
+            max(len(str(row[i])) for row in rows + [headers])
+            for i in range(len(headers))
+        ]
 
-            bound_count = (sum(bound_by_am.values()) if not detail
-                           else sum(len(v) for v in bound_by_am.values()))
-            lines = [f"PVCs in '{namespace}': {total} total "
-                     f"({bound_count} Bound, {len(non_bound)} non-Bound)."]
-            if bound_by_am:
-                lines.append("Bound PVCs by access mode + storage class:")
-                for k, val in sorted(bound_by_am.items()):
-                    if detail:
-                        lines.append(f"  {k}: {len(val)} PVC(s)")
-                        lines.extend(val)
-                    else:
-                        lines.append(f"  {k}: {val} PVC(s)")
-            if non_bound:
-                lines.append("Non-Bound PVCs (full detail):")
-                lines.extend(non_bound)
-            return "\n".join(lines)
+        lines = []
 
-        bound_by_am: dict = {}
-        non_bound = []
-        by_ns_am: dict = {}
-        for pvc in pvcs.items:
-            phase = pvc.status.phase or "Unknown"
-            sc    = pvc.spec.storage_class_name or "default"
-            cap   = (pvc.status.capacity or {}).get("storage", "?")
-            am    = _access(pvc)
-            ns_name = pvc.metadata.namespace
-            if phase == "Bound":
-                key = f"{am} ({sc})"
-                bound_by_am[key] = bound_by_am.get(key, 0) + 1
+        header_line = "  ".join(
+            headers[i].ljust(col_widths[i]) for i in range(len(headers))
+        )
+        lines.append(header_line)
 
-                ns_entry = by_ns_am.setdefault(ns_name, {})
-                for mode in (pvc.spec.access_modes or []):
-                    short = _AM.get(mode, mode)
-                    ns_entry[short] = ns_entry.get(short, 0) + 1
-            else:
-                non_bound.append(
-                    f"  {pvc.metadata.namespace}/{pvc.metadata.name}: "
-                    f"{phase} ⚠ | access:{am} | class:{sc} capacity:{cap}")
+        lines.append(
+            "  ".join("-" * col_widths[i] for i in range(len(headers)))
+        )
 
-        bound = sum(bound_by_am.values())
-        lines = [f"PVCs across all namespaces: {total} total ({bound} Bound, {len(non_bound)} non-Bound)."]
-        if bound_by_am:
-            lines.append("Bound PVCs by access mode + storage class (cluster totals):")
-            for k, count in sorted(bound_by_am.items()):
-                lines.append(f"  {k}: {count} PVC(s)")
+        for row in sorted(rows):
+            lines.append(
+                "  ".join(str(row[i]).ljust(col_widths[i]) for i in range(len(row)))
+            )
 
-        if by_ns_am:
-            lines.append("\nBound PVCs per namespace by access mode:")
-
-            for ns_name in sorted(by_ns_am, key=lambda n: -sum(by_ns_am[n].values())):
-                counts = by_ns_am[ns_name]
-                summary = "  ".join(f"{am}:{n}" for am, n in sorted(counts.items()))
-                lines.append(f"  {ns_name}: {summary}  (total {sum(counts.values())})")
-
-        if non_bound:
-            lines.append("Non-Bound PVCs:")
-            lines.extend(non_bound)
         return "\n".join(lines)
+
     except ApiException as e:
         return f"K8s API error (PVC listing): {e.reason}"
 
@@ -3682,27 +3663,31 @@ K8S_TOOLS: dict = {
     },
 
     "get_pvc_status": {
-        "fn":          get_pvc_status,
+        "fn": get_pvc_status,
         "description": (
-            "Check PersistentVolumeClaims — access mode (RWO/RWX/ROX), capacity, storage class, bound volume. "
-            "Returns a grouped summary by access mode + storage class (concise, fast). "
-            "Set detail=true only when asked about a specific workload's individual PVC names. "
-            "NAMESPACE RULE — CRITICAL: if the user does not name a specific namespace, "
-            "ALWAYS use namespace='all'. Never infer or guess a namespace (e.g. 'longhorn-system', "
-            "'vault-system') when none was stated. Only scope to a specific namespace when the user "
-            "explicitly names one (e.g. 'PVCs in longhorn-system', 'PVCs for vault')."
+         "List PersistentVolumeClaims with key storage details in a table format. "
+         "Shows namespace, PVC name, bound volume ID, capacity, access mode (RWO/RWX/ROX), "
+         "PVC status phase (Bound/Pending/Lost), and which pod(s) are currently using the claim "
+         "or 'unbound' if no pod is mounting it. "
+         "Useful for quickly identifying unbound PVCs, orphaned storage, or workload storage usage. "
+
+         "NAMESPACE RULE — CRITICAL: if the user does not name a specific namespace, "
+         "ALWAYS use namespace='all'. Never infer or guess a namespace. "
+         "Only scope to a namespace when the user explicitly names one "
+         "(e.g. 'PVCs in vault', 'PVCs in longhorn-system')."
         ),
-        "parameters":  {
-            "namespace": {"type": "string",  "default": "all",
-                          "description": (
-                              "Namespace to query. DEFAULT is 'all' — use this whenever the user does "
-                              "not explicitly name a namespace. Only override when the user's question "
-                              "names a namespace directly."
-                          )},
-            "detail":    {"type": "boolean", "default": False,
-                          "description": "Set true only to list individual PVC names (slower on large namespaces)."},
+        "parameters": {
+         "namespace": {
+             "type": "string",
+             "default": "all",
+             "description": (
+                 "Namespace to query. Default is 'all'. "
+                 "Use 'all' whenever the user does not explicitly specify a namespace."
+             )
+         }
         },
     },
+
     "get_persistent_volumes": {
         "fn":          get_persistent_volumes,
         "description": (
