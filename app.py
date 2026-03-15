@@ -179,15 +179,17 @@ def build_agent():
         original_question = next((m.content for m in msgs if isinstance(m, HumanMessage)), "")
         tool_results = [m for m in msgs if isinstance(m, ToolMessage)]
 
+        _oq_lower = original_question.lower()
         _NS_WORDS = ("namespace", " ns=", " ns ", "in namespace", "for namespace",
-                     "in the namespace", "-n ", "default namespace")
-        _ns_specified = any(k in original_question.lower() for k in _NS_WORDS)
+                     "in the namespace", "-n ", "cdp", "cmlwb", "longhorn", "vault",
+                     "cattle", "rancher", "cert", "default namespace")
+        _ns_specified = any(k in _oq_lower for k in _NS_WORDS)
         _needs_ns = any(
             tc_name in (getattr(m, "name", "") or "")
             for m in msgs if isinstance(m, ToolMessage)
-            for tc_name in ("get_deployment_status", "get_daemonset_status",
+            for tc_name in ("get_pod_status", "get_deployment_status", "get_daemonset_status",
                             "get_statefulset_status", "get_job_status", "get_hpa_status",
-                            "get_service_status", "get_ingress_status",
+                            "get_pvc_status", "get_service_status", "get_ingress_status",
                             "get_resource_quotas", "get_configmap_list", "get_service_accounts")
         )
         _ns_prefix = (
@@ -204,13 +206,101 @@ def build_agent():
             parts.append(f"--- TOOL RESULT {i} ---\n{body}\n")
         combined = "".join(parts)
 
-        _TOOL_FORMATS = {name: "Reproduce the tool output EXACTLY as returned, without summarising or changing anything."
-                         for name in (
-            "get_pod_logs", "get_unhealthy_pods_detail", "get_pvc_status", "get_pv_usage",
-            "get_coredns_health", "describe_pod", "query_prometheus_metrics", "get_pod_images",
-            "get_node_resource_requests", "kubectl_exec", "get_pod_status", "get_namespace_resource_summary",
-            "get_node_health", "get_gpu_info"
-        )}
+        _TOOL_FORMATS = {
+            "get_pod_logs": (
+                "Reproduce the log output EXACTLY as returned by the tool. "
+                "Include every log line with its full timestamp. "
+                "Do NOT summarise, paraphrase, or describe the log content in prose. "
+                "If the tool returned an error, state it exactly."
+            ),
+            "get_unhealthy_pods_detail": (
+                "List EVERY pod from the tool results. "
+                "One bullet per pod. Format: "
+                "`namespace/pod-name`: <phase> | Restarts: <N> | Cause: <reason> "
+                "(use exit code, OOMKilled, liveness probe failure, StartError, or last log lines). "
+                "Do NOT write prose. Do NOT skip any pod."
+            ),
+            "get_pvc_status": (
+                "List every non-Bound PVC from the results. "
+                "Format per PVC: namespace/name, phase, storage class, capacity. "
+                "If all PVCs are Bound, say so explicitly. "
+                "Do NOT include Bound PVCs unless the user asked for all PVCs."
+            ),
+            "get_pv_usage": (
+                "Reproduce the storage usage report in full — do NOT summarise. "
+                "Include every PVC entry: those nearing capacity, within capacity, AND skipped. "
+                "For skipped entries show the exact reason from the tool output."
+            ),
+            "get_coredns_health": (
+                "Report CoreDNS health from the tool results. "
+                "State each pod's phase and readiness. "
+                "Include DNS resolution test results exactly as shown. "
+                "Use bullet points, one per pod/test."
+            ),
+            "describe_pod": (
+                "Report the pod details from the tool results. "
+                "Include: phase, conditions, each container's state and restart count, "
+                "resource requests and limits. Use the exact values from the tool output."
+            ),
+            "query_prometheus_metrics": (
+                "Present the metrics exactly as returned. "
+                "List each series with its last value. Do not round or omit any series."
+            ),
+            "get_pod_images": (
+                "List every pod from the results. "
+                "Format: `namespace/pod-name` [container]: registry/image:tag. "
+                "Do NOT show health fields (phase/restarts/cause) — image and tag only."
+            ),
+            "get_node_resource_requests": (
+                "Reproduce the node resource table exactly. "
+                "Include every node with its CPU and memory figures."
+            ),
+            "kubectl_exec": (
+                "Reproduce the command output VERBATIM. "
+                "Do NOT reformat, summarise, or omit any rows."
+            ),
+            "get_pod_status": (
+                "Reproduce the pod table VERBATIM — every row, every column. "
+                "Do NOT summarise, count, or describe in prose. "
+                "If the result is a single summary sentence (e.g. 'All pods healthy'), "
+                "reproduce it exactly."
+            ),
+            "get_namespace_resource_summary": (
+                "ALWAYS lead with the total figures at the top of the answer: "
+                "total CPU requested, total CPU limit, total memory requested, total memory limit. "
+                "Then list the per-pod breakdown. "
+                "Do NOT start by listing individual pods — the total is the answer to a calculate question."
+            ),
+            "get_node_health": (
+                "Report the node health from the tool results. "
+                "For each node state: name, Ready status, any pressure conditions. "
+                "For GPU nodes include the EXACT GPU count and status string as returned — "
+                "e.g. 'GPU:2/2 (all in use — none free)' or 'GPU:0/2 (none in use — all free)'. "
+                "Do NOT paraphrase GPU status — copy the exact numbers and state label."
+            ),
+            "get_gpu_info": (
+                "Report GPU details from the tool results. "
+                "State the exact GPU model, total allocatable count, and how many are in use vs free. "
+                "Use the exact numbers from the tool output — do NOT say 'available and in use' "
+                "as that is contradictory. State in-use count and free count separately."
+            ),
+        }
+
+        _HEALTH_SWEEP_TOOLS = {
+            "get_node_health", "get_pod_status", "get_deployment_status",
+            "get_pvc_status", "get_events", "get_daemonset_status",
+            "get_statefulset_status", "get_job_status", "get_hpa_status",
+        }
+        _is_health_sweep = (
+            len(tool_results) >= 3
+            and _tools_used.issubset(_HEALTH_SWEEP_TOOLS | {""})
+        )
+
+        _ENUMERATION_TOOLS = {
+            "get_pod_status", "get_deployment_status", "get_daemonset_status",
+            "get_statefulset_status", "get_job_status", "get_hpa_status",
+            "get_service_status", "get_namespace_status",
+        }
 
         _single_tool = next(iter(_tools_used - {""}), None)
         if len(_tools_used - {""}) == 1 and _single_tool in _TOOL_FORMATS:
@@ -219,23 +309,42 @@ def build_agent():
                 f"Tool Results:\n{combined}\n"
                 + _TOOL_FORMATS[_single_tool]
             )
+
+        elif _is_health_sweep:
+            synthesis_prompt = (
+                f"Question: {original_question}\n\n"
+                f"Tool Results:\n{combined}\n"
+                "Write a concise cluster health summary:\n"
+                "1. Overall status in one sentence (healthy / issues found).\n"
+                "2. If any problems exist, list them specifically: exact pod, node, "
+                "deployment, PVC, or event with its state.\n"
+                "3. If everything is healthy, say so briefly — do not list healthy items.\n"
+                "Use plain sentences. No markdown headers. No closing remarks."
+            )
+
+        elif _single_tool in _ENUMERATION_TOOLS:
+            synthesis_prompt = (
+                f"Question: {original_question}\n\n"
+                f"Tool Results:\n{combined}\n"
+                "List EVERY item from the tool results. "
+                "One bullet per item. Include namespace, name, and relevant state. "
+                "Do NOT skip or summarise any item. "
+                "If the result is a summary line (e.g. 'All pods healthy'), "
+                "reproduce it exactly without expansion."
+            )
+
         else:
             synthesis_prompt = (
                 f"Question: {original_question}\n\n"
                 f"Tool Results:\n{combined}\n"
-                "Reproduce the tool output EXACTLY as returned, without summarising or changing anything."
+                "Answer the question using only the tool results above. "
+                "Be specific — name exact pods, nodes, or resources. "
+                "If the results contain a list, reproduce it in full. "
+                "If the question asks for a count, state the number directly. "
+                "No preamble. No closing remarks."
             )
 
         return [HumanMessage(content=_ns_prefix + synthesis_prompt)]
-
-    return {
-        "tool_schemas": tool_schemas,
-        "tokenizer": tokenizer,
-        "model": model,
-        "is_qwen3": _is_qwen3,
-        "prompt": prompt,
-        "prepare_messages": _prepare_messages_for_hf,
-    }
 
     def _msgs_to_qwen3(msgs: list, include_tools: bool) -> list:
         result = []
@@ -292,6 +401,18 @@ def build_agent():
 
         tcs = _parse_tool_calls(raw_text)
         content = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', raw_text).strip()
+        
+        # Prepend the namespace assumption if it was triggered
+        _ns_prepend = ""
+        for m in invoke_msgs:
+            if isinstance(m, HumanMessage):
+                _m = re.match(r'^§NS_PREFIX§(.*?)§END_NS§\n\n', m.content, re.DOTALL)
+                if _m:
+                    _ns_prepend = _m.group(1).strip() + "\n\n"
+                break
+        if _ns_prepend:
+            content = _ns_prepend + content
+
         response = AIMessage(content=content, tool_calls=tcs)
         if tcs: updates.append(f"🔧 {', '.join(tc['name'] for tc in tcs)}")
         return {"messages": [response], "tool_calls_made": state.get("tool_calls_made", []), "iteration": itr, "status_updates": updates}
@@ -336,7 +457,8 @@ def build_agent():
 _agent = None
 def get_agent():
     global _agent
-    if _agent is None: _agent = build_agent()
+    if _agent is None: 
+        _agent = build_agent()
     return _agent
 
 def _clean_response(text: str, user_question: str = "") -> str:
@@ -353,8 +475,10 @@ def _clean_response(text: str, user_question: str = "") -> str:
 async def run_agent(user_message: str) -> dict:
     import uuid
     req_id = uuid.uuid4().hex[:8]
-    agent, t0 = get_agent(), time.time()
-    final = await agent.ainvoke({"messages": [HumanMessage(content=user_message)], "tool_calls_made": [], "iteration": 0, "status_updates": [f"🤖 Model: {config.LLM_MODEL}"], "req_id": req_id})
+    _runnable_agent = get_agent()
+    t0 = time.time()
+    
+    final = await _runnable_agent.ainvoke({"messages": [HumanMessage(content=user_message)], "tool_calls_made": [], "iteration": 0, "status_updates": [f"🤖 Model: {config.LLM_MODEL}"], "req_id": req_id})
     elapsed, last = time.time() - t0, final["messages"][-1]
     raw = last.content if hasattr(last, "content") else str(last)
     updates = final.get("status_updates", [])
@@ -364,8 +488,10 @@ async def run_agent(user_message: str) -> dict:
 async def run_agent_streaming(user_message: str, history: list = None, max_new_tokens: int = 0):
     def _sse(payload: dict) -> str: return f"data: {json.dumps(payload)}\n\n"
     import uuid, asyncio
-    req_id, agent, t0 = uuid.uuid4().hex[:8], get_agent(), time.time()
+    req_id, t0 = uuid.uuid4().hex[:8], time.time()
     
+    _runnable_agent = get_agent()
+        
     yield _sse({"type": "status", "text": f"🤖 Model: {config.LLM_MODEL}"})
     config.logger.info(f"[REQ:{req_id}] /chat/stream  q={user_message[:120]!r}")
 
@@ -389,7 +515,7 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
         history_msgs = [HumanMessage(content=t.content) if t.role == "user" else _AIMessage(content=t.content) for t in (history or [])]
         all_messages = history_msgs + [HumanMessage(content=user_message)]
 
-        async for event in agent.astream_events(
+        async for event in _runnable_agent.astream_events(
             {"messages": all_messages, "tool_calls_made": [], "iteration": 0, "status_updates": [], "req_id": req_id}, 
             version="v2", 
             config={"recursion_limit": 12}
@@ -400,33 +526,28 @@ async def run_agent_streaming(user_message: str, history: list = None, max_new_t
             
             kind, name = event.get("event", ""), event.get("name", "")
 
-            # 1. LLM Start (Loop counter)
             if kind == "on_chain_start" and name == "llm":
                 iteration_count += 1
                 txt = f"🧠 Loop {iteration_count} — LLM thinking…"
                 config.logger.info(f"[REQ:{req_id}] {txt}")
                 yield _sse({"type": "iteration", "iteration": iteration_count, "text": txt, "has_tool_calls": None})
 
-            # 2. Node End (Capture state updates from BOTH 'llm' and 'tools' nodes)
             elif kind == "on_chain_end" and name in ["llm", "tools"]:
                 output = event.get("data", {}).get("output", {})
                 if not isinstance(output, dict):
                     continue
                 
-                # Extract UI status updates (this pushes the 🔧 and ⚙️ icons to the screen)
                 node_updates = output.get("status_updates", [])
                 for u in node_updates:
                     if u not in all_updates:
                         all_updates.append(u)
                         yield _sse({"type": "status", "text": u})
                 
-                # Extract the running list of tools called
                 node_tools = output.get("tool_calls_made", [])
                 for t in node_tools:
                     if t not in tools_called:
                         tools_called.append(t)
 
-                # Special LLM logic for extracting final answer & iteration status
                 if name == "llm":
                     has_tool_calls = any(getattr(m, "tool_calls", None) for m in output.get("messages", []))
                     
@@ -497,48 +618,9 @@ def _llm_synthesise(context: str, question: str, top_k: int = 50, max_tokens: in
     except Exception as exc: 
         return context or ""
 
-def _run_startup_checks():
-    SMOKE_TESTS = [("get_node_health", {}), ("get_namespace_status", {}), ("get_pod_status", {"namespace": "all"})]
-    logger.info("[Self-test] Running kubectl tool smoke-tests…")
-    for name, kwargs in SMOKE_TESTS:
-        cfg = K8S_TOOLS.get(name)
-        if cfg is None: continue
-        try:
-            result = cfg["fn"](**kwargs)
-            if "error" in result.lower(): logger.warning(f"[Self-test] ⚠ {name}: {result[:120]}")
-            else: logger.info(f"[Self-test] ✓ {name}: {result.replace(chr(10), ' ')[:80]}…")
-        except Exception as e: logger.warning(f"[Self-test] ⚠ {name} raised: {e}")
+# ── 3. FASTAPI ENDPOINTS ─────────────────────────────────────────────────────
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    logger.info("=" * 60)
-    logger.info(f"Cloudera ECS AI Ops")
-    logger.info(f"  LLM      : {config.LLM_MODEL}")
-    logger.info(f"  Embed    : {config.EMBED_MODEL}")
-    logger.info(f"  GPU      : {config.NUM_GPU} GPU(s)")
-    logger.info(f"  Tools    : {len(K8S_TOOLS)} kubectl tools registered")
-    logger.info("=" * 60)
-
-    _run_startup_checks()
-    try:
-        init_db()
-        stats = get_doc_stats()
-        logger.info(f"[LanceDB] Ready — {stats['docs_chunks']} doc chunks, {stats['excel_rows']} Excel rows")
-    except Exception as e: logger.error(f"[LanceDB] Init failed: {e}")
-
-    logger.info("[Agent] Pre-warming LLM…")
-    get_agent()
-    logger.info("Startup complete ✓")
-    yield
-    logger.info("Shutting down")
-
-app = FastAPI(title="Cloudera ECS AI Ops", lifespan=_lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
-if _HERE.joinpath("web", "static").exists():
-    app.mount("/static", StaticFiles(directory=str(_HERE / "web" / "static")), name="static")
-
-# ── 4. API ENDPOINTS ─────────────────────────────────────────────────────────
+app = FastAPI(title="Cloudera ECS AI Ops")
 
 @app.get("/health")
 async def health():
@@ -550,6 +632,7 @@ async def apply_kubeconfig(req: KubeconfigRequest):
     try:
         result = reload_kubeconfig(req.kubeconfig)
         if result.get("server") and result["server"] != "unknown":
+            import re
             config.CLUSTER_SERVER = re.sub(r'^https?://', '', result["server"]).strip()
         return result
     except ValueError as e: return _JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
@@ -818,7 +901,49 @@ async def serve_ui():
         return FileResponse(str(_HERE / "web" / "index.html"), media_type="text/html")
     return _JSONResponse(status_code=404, content={"error": "web/index.html not found"})
 
-# ── 4. ENTRY POINT & EXACT ORIGINAL PRINTS ───────────────────────────────────
+# ── 4. LIFESPAN & STARTUP ────────────────────────────────────────────────────
+
+def _run_startup_checks():
+    SMOKE_TESTS = [("get_node_health", {}), ("get_namespace_status", {}), ("get_pod_status", {"namespace": "all"})]
+    config.logger.info("[Self-test] Running kubectl tool smoke-tests…")
+    for name, kwargs in SMOKE_TESTS:
+        cfg = K8S_TOOLS.get(name)
+        if cfg is None: continue
+        try:
+            result = cfg["fn"](**kwargs)
+            if "error" in result.lower(): config.logger.warning(f"[Self-test] ⚠ {name}: {result[:120]}")
+            else: config.logger.info(f"[Self-test] ✓ {name}: {result.replace(chr(10), ' ')[:80]}…")
+        except Exception as e: config.logger.warning(f"[Self-test] ⚠ {name} raised: {e}")
+
+@app.on_event("startup")
+async def _startup_event():
+    config.logger.info("=" * 60)
+    config.logger.info(f"Cloudera ECS AI Ops")
+    config.logger.info(f"  LLM      : {config.LLM_MODEL}")
+    config.logger.info(f"  Embed    : {config.EMBED_MODEL}")
+    config.logger.info(f"  GPU      : {config.NUM_GPU} GPU(s)")
+    config.logger.info(f"  Tools    : {len(K8S_TOOLS)} kubectl tools registered")
+    config.logger.info("=" * 60)
+
+    _run_startup_checks()
+    try:
+        init_db()
+        stats = get_doc_stats()
+        config.logger.info(f"[LanceDB] Ready — {stats['docs_chunks']} doc chunks, {stats['excel_rows']} Excel rows")
+    except Exception as e: config.logger.error(f"[LanceDB] Init failed: {e}")
+
+    config.logger.info("[Agent] Pre-warming LLM…")
+    get_agent()
+    config.logger.info("Startup complete ✓")
+
+@app.on_event("shutdown")
+async def _shutdown_event():
+    config.logger.info("Shutting down")
+
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+if _HERE.joinpath("web", "static").exists():
+    app.mount("/static", StaticFiles(directory=str(_HERE / "web" / "static")), name="static")
 
 if __name__ == "__main__":
     if config.ARGS.ingest:
