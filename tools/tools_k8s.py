@@ -893,32 +893,20 @@ def get_hpa_status(namespace: str = "all") -> str:
     except ApiException as e:
         return f"K8s API error: {e.reason}"
 
-def get_pvc_status(namespace: str = "all", status: str = "all") -> str:
-    """
-    List Kubernetes PersistentVolumeClaims (PVCs) in a table format.
-    
-    Columns: NAMESPACE, PVC, VOLUME, CAPACITY, ACCESS (RWO/RWX/ROX), STATUS (Bound/Pending/Lost), POD(s)
-    
-    Parameters:
-    - namespace: Kubernetes namespace to query; default 'all'
-    - status: Filter PVCs by phase: 'all', 'bound', or 'not_bound'
-    
-    Behavior:
-    - Shows which pod(s) are using each PVC, or 'unbound' if none.
-    - Namespace rule: if no namespace specified, always use 'all'.
-    """
-    
-    _AM = {"ReadWriteOnce": "RWO", "ReadWriteMany": "RWX", "ReadOnlyMany": "ROX"}
+def get_pvc_status(namespace: str = "all") -> str:
+    _AM = {
+        "ReadWriteOnce": "RWO",
+        "ReadWriteMany": "RWX",
+        "ReadOnlyMany": "ROX"
+    }
 
     try:
-        # Fetch PVCs
         pvcs = (
             _core.list_persistent_volume_claim_for_all_namespaces()
             if namespace == "all"
             else _core.list_namespaced_persistent_volume_claim(namespace=namespace)
         )
 
-        # Fetch pods to map PVC -> pods
         pods = (
             _core.list_pod_for_all_namespaces()
             if namespace == "all"
@@ -926,6 +914,8 @@ def get_pvc_status(namespace: str = "all", status: str = "all") -> str:
         )
 
         pvc_to_pods = {}
+
+        # Map PVC -> pods using it
         for pod in pods.items:
             for vol in pod.spec.volumes or []:
                 if vol.persistent_volume_claim:
@@ -935,45 +925,56 @@ def get_pvc_status(namespace: str = "all", status: str = "all") -> str:
                     pvc_to_pods.setdefault(key, []).append(pod.metadata.name)
 
         rows = []
+
         for pvc in pvcs.items:
             ns = pvc.metadata.namespace
             name = pvc.metadata.name
-            vol = pvc.spec.volume_name or "<unbound>"
+
             cap = (pvc.status.capacity or {}).get("storage", "?")
+            vol = pvc.spec.volume_name or "<unbound>"
             phase = pvc.status.phase or "Unknown"
+
             modes = pvc.spec.access_modes or []
             access = ",".join(_AM.get(m, m) for m in modes) or "?"
 
-            # Filter by status parameter
-            if status == "bound" and phase != "Bound":
-                continue
-            if status == "not_bound" and phase == "Bound":
-                continue
-
             key = f"{ns}/{name}"
             pods_using = pvc_to_pods.get(key)
-            pod_str = ",".join(pods_using) if pods_using else "unbound"
 
-            rows.append([ns, name, vol, cap, access, phase, pod_str])
+            pod = ",".join(pods_using) if pods_using else "unbound"
+
+            rows.append([ns, name, vol, cap, access, phase, pod])
 
         if not rows:
-            return f"No PVCs with status '{status}' found in namespace '{namespace}'."
+            return f"No PVCs found in namespace '{namespace}'."
 
-        # Prepare table
         headers = ["NAMESPACE", "PVC", "VOLUME", "CAPACITY", "ACCESS", "STATUS", "POD"]
-        col_widths = [max(len(str(row[i])) for row in rows + [headers]) for i in range(len(headers))]
+
+        col_widths = [
+            max(len(str(row[i])) for row in rows + [headers])
+            for i in range(len(headers))
+        ]
 
         lines = []
-        lines.append("  ".join(headers[i].ljust(col_widths[i]) for i in range(len(headers))))
-        lines.append("  ".join("-" * col_widths[i] for i in range(len(headers))))
+
+        header_line = "  ".join(
+            headers[i].ljust(col_widths[i]) for i in range(len(headers))
+        )
+        lines.append(header_line)
+
+        lines.append(
+            "  ".join("-" * col_widths[i] for i in range(len(headers)))
+        )
+
         for row in sorted(rows):
-            lines.append("  ".join(str(row[i]).ljust(col_widths[i]) for i in range(len(row))))
+            lines.append(
+                "  ".join(str(row[i]).ljust(col_widths[i]) for i in range(len(row)))
+            )
 
         return "\n".join(lines)
 
     except ApiException as e:
         return f"K8s API error (PVC listing): {e.reason}"
-        
+
 def get_persistent_volumes() -> str:
     _AM = {"ReadWriteOnce": "RWO", "ReadWriteMany": "RWX", "ReadOnlyMany": "ROX",
            "ReadWriteOncePod": "RWOP"}
@@ -3662,20 +3663,28 @@ K8S_TOOLS: dict = {
     },
 
     "get_pvc_status": {
-        "fn":          get_pvc_status,
+        "fn": get_pvc_status,
         "description": (
-            "List Kubernetes PersistentVolumeClaims (PVCs) in a table showing NAMESPACE, PVC name, "
-            "VOLUME (PV name), CAPACITY, ACCESS mode (RWO/RWX/ROX), STATUS phase (Bound/Pending/Lost), "
-            "and POD(s) mounting each PVC or 'unbound' if none. "
-            "Supports filtering by status: 'all' (default), 'bound', or 'not_bound'. "
-            "Use this tool when the user asks about PVCs, persistent volumes, storage usage, "
-            "which pod uses a PVC, unbound or orphaned storage, or Kubernetes storage troubleshooting. "
-            "NAMESPACE RULE — if the user does not specify a namespace, always use namespace='all'. "
-            "Only scope to a namespace if explicitly named (e.g. 'PVCs in vault', 'PVCs in longhorn-system')."
+         "List PersistentVolumeClaims with key storage details in a table format. "
+         "Shows namespace, PVC name, bound volume ID, capacity, access mode (RWO/RWX/ROX), "
+         "PVC status phase (Bound/Pending/Lost), and which pod(s) are currently using the claim "
+         "or 'unbound' if no pod is mounting it. "
+         "Useful for quickly identifying unbound PVCs, orphaned storage, or workload storage usage. "
+
+         "NAMESPACE RULE — CRITICAL: if the user does not name a specific namespace, "
+         "ALWAYS use namespace='all'. Never infer or guess a namespace. "
+         "Only scope to a namespace when the user explicitly names one "
+         "(e.g. 'PVCs in vault', 'PVCs in longhorn-system')."
         ),
-        "parameters":  {
-            "namespace": {"type": "string", "default": "all", "description": "Namespace to query. Default is 'all'."},
-            "status":    {"type": "string", "default": "all", "enum": ["all", "bound", "not_bound"], "description": "Filter PVCs by phase: 'all', 'bound', or 'not_bound'."}
+        "parameters": {
+         "namespace": {
+             "type": "string",
+             "default": "all",
+             "description": (
+                 "Namespace to query. Default is 'all'. "
+                 "Use 'all' whenever the user does not explicitly specify a namespace."
+             )
+         }
         },
     },
 
