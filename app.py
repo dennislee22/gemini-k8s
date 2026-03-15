@@ -710,10 +710,15 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 if os.path.exists("web/static"): app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
-@app.get("/", response_class=FileResponse)
+@app.get("/")
 async def serve_ui():
-    if os.path.exists("web/index.html"): return FileResponse("web/index.html", media_type="text/html")
-    return {"error": "web/index.html not found"}
+    if os.path.exists("web/index.html"): 
+        return FileResponse("web/index.html", media_type="text/html")
+    # Return a proper JSONResponse instead of a raw dict
+    return JSONResponse(
+        status_code=404, 
+        content={"error": "web/index.html not found"}
+    )
 
 if __name__ == "__main__":
     if config.ARGS.ingest:
