@@ -2,7 +2,8 @@ import os, sys, argparse, logging, logging.handlers
 import re
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
+# Go up one extra level since this file is now inside the config/ folder
+_HERE = Path(__file__).resolve().parent.parent
 
 # --- ARGPARSE & ENV ---
 _pre = argparse.ArgumentParser(add_help=False)
